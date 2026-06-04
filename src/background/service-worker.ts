@@ -11,14 +11,18 @@ import {
   getSettings,
   getTabState,
   resetAll,
+  saveTabState,
   updateSettings,
 } from "./storage";
 import { warmupEmbedder } from "./embedder";
+import { buildCollectionSummary } from "./summarizer";
 import type {
   AnyMessage,
   GetGroupsResponse,
   GetSettingsResponse,
+  GetSummaryResponse,
 } from "@/shared/messages";
+import type { ClassificationOptions } from "@/shared/types";
 
 const debounceTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const DEBOUNCE_MS = 300;
@@ -37,8 +41,15 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status !== "complete") return;
-  scheduleClassification(tabId, tab);
+  // When the URL changes, mark the tab dirty so the next "complete" event
+  // triggers a forced reclassification (even for already-grouped tabs).
+  if (changeInfo.url) {
+    void handleUrlDirty(tabId, changeInfo.url);
+  }
+
+  if (changeInfo.status === "complete") {
+    scheduleClassification(tabId, tab);
+  }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -78,7 +89,10 @@ chrome.tabGroups.onRemoved.addListener(async (group) => {
   await chrome.storage.local.set({ groups: nextGroups });
 
   const tabs = await chrome.storage.local.get("tabs");
-  const tabStates = (tabs.tabs ?? {}) as Record<number, { groupKey: string | null }>;
+  const tabStates = (tabs.tabs ?? {}) as Record<
+    number,
+    { groupKey: string | null }
+  >;
   let tabsTouched = false;
   for (const tabId of Object.keys(tabStates)) {
     const state = tabStates[Number(tabId)];
@@ -92,13 +106,35 @@ chrome.tabGroups.onRemoved.addListener(async (group) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message: AnyMessage, sender, sendResponse) => {
-  void handleMessage(message, sender).then(sendResponse).catch((err) => {
-    console.error("[auto-tab-group] message error", err);
-    sendResponse({ error: String(err) });
+chrome.runtime.onMessage.addListener(
+  (message: AnyMessage, sender, sendResponse) => {
+    void handleMessage(message, sender)
+      .then(sendResponse)
+      .catch((err) => {
+        console.error("[auto-tab-group] message error", err);
+        sendResponse({ error: String(err) });
+      });
+    return true;
+  },
+);
+
+// ── URL dirty tracking ────────────────────────────────────────────────────────
+
+async function handleUrlDirty(tabId: number, newUrl: string): Promise<void> {
+  const tabState = await getTabState(tabId);
+  // Only mark dirty if the tab was already classified in a group
+  if (!tabState?.groupKey) return;
+  // Skip if URL hasn't actually changed
+  if (tabState.lastUrl === newUrl) return;
+
+  await saveTabState({
+    ...tabState,
+    urlDirty: true,
+    navigationVersion: (tabState.navigationVersion ?? 0) + 1,
   });
-  return true;
-});
+}
+
+// ── Classification scheduling ─────────────────────────────────────────────────
 
 function scheduleClassification(tabId: number, tab: chrome.tabs.Tab): void {
   const existing = debounceTimers.get(tabId);
@@ -120,25 +156,52 @@ async function runClassification(
   } catch {
     return;
   }
-  if (!shouldClassify(tab)) return;
+
+  const tabState = await getTabState(tabId);
+  const isUrlChange = tabState?.urlDirty === true;
   const settings = await getSettings();
+
   if (!settings.enabled) return;
 
-  const content =
-    settings.contentExtractionEnabled
-      ? (await requestExtract(tabId)) ?? (await fallbackExtract(tab))
-      : await fallbackExtract(tab);
+  // For URL changes on already-grouped tabs: bypass the "already-grouped" filter.
+  // For all other cases: apply the normal filter.
+  if (!isUrlChange && !shouldClassify(tab)) return;
+
+  // If this is a URL change but the URL ended up being the same, just clear dirty.
+  if (isUrlChange && tabState?.lastUrl === tab.url) {
+    await saveTabState({ ...tabState, urlDirty: false });
+    return;
+  }
+
+  const content = settings.contentExtractionEnabled
+    ? ((await requestExtract(tabId)) ?? (await fallbackExtract(tab)))
+    : await fallbackExtract(tab);
 
   if (!content.title && !content.contentSnippet) {
     content.title = tab.title ?? tabHint.title ?? "";
   }
 
+  const hasCurrentGroup = !!tabState?.groupKey;
+  const classifyOptions: ClassificationOptions = isUrlChange
+    ? {
+        reason: "url-change",
+        allowReassign: true,
+        allowUngroup: settings.urlChangeReclassifyEnabled,
+        force: false,
+      }
+    : {
+        reason: "initial",
+        allowReassign: !hasCurrentGroup,
+      };
+
   try {
-    await classifyTab(tab, content);
+    await classifyTab(tab, content, classifyOptions);
   } catch (err) {
     console.error("[auto-tab-group] classify failed", err);
   }
 }
+
+// ── RECLASSIFY handler (content-change from MutationObserver) ─────────────────
 
 async function handleReclassify(
   tabId: number,
@@ -155,11 +218,16 @@ async function handleReclassify(
   const tabState = await getTabState(tabId);
   const allowReassign = !tabState?.groupKey || tabState.pendingReclassify;
   try {
-    await classifyTab(tab, content, { allowReassign });
+    await classifyTab(tab, content, {
+      reason: "content-change",
+      allowReassign,
+    });
   } catch (err) {
     console.error("[auto-tab-group] reclassify failed", err);
   }
 }
+
+// ── Message handler ───────────────────────────────────────────────────────────
 
 async function handleMessage(
   message: AnyMessage,
@@ -188,6 +256,15 @@ async function handleMessage(
       };
       return response;
     }
+    case "GET_SUMMARY": {
+      const groups = await getAllGroups();
+      const summary = buildCollectionSummary(groups);
+      const response: GetSummaryResponse = {
+        type: "GET_SUMMARY_RESULT",
+        summary,
+      };
+      return response;
+    }
     case "UPDATE_SETTINGS": {
       const settings = await updateSettings(message.settings);
       return { ok: true, settings };
@@ -200,7 +277,10 @@ async function handleMessage(
         const content =
           (await requestExtract(tab.id)) ?? (await fallbackExtract(tab));
         try {
-          await classifyTab(tab, content, { allowReassign: true });
+          await classifyTab(tab, content, {
+            reason: "manual-regroup",
+            allowReassign: true,
+          });
         } catch (err) {
           console.warn("[auto-tab-group] regroup tab failed", tab.id, err);
         }

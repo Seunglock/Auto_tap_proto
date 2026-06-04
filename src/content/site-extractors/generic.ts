@@ -1,36 +1,24 @@
+import { extractCoreContent } from "../core-content";
+
 export function extractGeneric(): string {
+  const meta = getMetaDescription();
+  const core = extractCoreContent();
   const parts: string[] = [];
-
-  const ogTitle = metaContent('meta[property="og:title"]');
-  if (ogTitle) parts.push(ogTitle);
-
-  const desc =
-    metaContent('meta[name="description"]') ??
-    metaContent('meta[property="og:description"]');
-  if (desc) parts.push(desc);
-
-  const h1 = document.querySelector("h1");
-  if (h1?.textContent) parts.push(h1.textContent.trim());
-
-  const main =
-    document.querySelector("article") ??
-    document.querySelector("main") ??
-    document.querySelector('[role="main"]');
-  if (main) {
-    const mainText = (main as HTMLElement).innerText?.trim();
-    if (mainText) parts.push(mainText.slice(0, 800));
-  } else {
-    const bodyText = (document.body?.innerText ?? "").trim();
-    if (bodyText) parts.push(bodyText.slice(0, 500));
-  }
-
+  if (meta && !core.text.startsWith(meta.slice(0, 40))) parts.push(meta);
+  if (core.text) parts.push(core.text);
   return dedupePieces(parts).join(" | ").replace(/\s+/g, " ").trim();
 }
 
-function metaContent(selector: string): string | null {
-  const el = document.querySelector(selector) as HTMLMetaElement | null;
+function getMetaDescription(): string | null {
+  const el =
+    (document.querySelector(
+      'meta[name="description"]',
+    ) as HTMLMetaElement | null) ??
+    (document.querySelector(
+      'meta[property="og:description"]',
+    ) as HTMLMetaElement | null);
   const content = el?.content?.trim();
-  return content && content.length > 0 ? content : null;
+  return content && content.length > 10 ? content : null;
 }
 
 function dedupePieces(pieces: string[]): string[] {

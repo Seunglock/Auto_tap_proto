@@ -31,13 +31,21 @@ export function buildPassageText(
   title: string,
   url: string,
   contentSnippet: string,
+  headings?: string[],
 ): string {
   const domain = safeDomain(url);
   const cleanTitle = (title ?? "").replace(/\s+/g, " ").trim();
   const cleanSnippet = (contentSnippet ?? "").replace(/\s+/g, " ").trim();
   const titleWeighted = cleanTitle ? `${cleanTitle}. ${cleanTitle}.` : "";
   const includeDomain = domain.length > 0 && !isSearchEngineHost(domain);
-  const combined = [titleWeighted, includeDomain ? domain : "", cleanSnippet]
+  const headingText =
+    headings && headings.length > 0 ? headings.slice(0, 3).join(" / ") : "";
+  const combined = [
+    titleWeighted,
+    headingText,
+    includeDomain ? domain : "",
+    cleanSnippet,
+  ]
     .filter((s) => s.length > 0)
     .join(" | ")
     .trim();

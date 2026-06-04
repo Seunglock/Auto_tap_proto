@@ -1,6 +1,6 @@
 import { cosineSimilarity, l2Normalize } from "./embedder";
 import { TAB_GROUP_COLORS } from "@/shared/constants";
-import type { GroupRecord, TabGroupColor } from "@/shared/types";
+import type { GroupDocument, GroupRecord, TabGroupColor } from "@/shared/types";
 
 export type Match = {
   groupKey: string;
@@ -48,4 +48,21 @@ export function pickColor(label: string): TabGroupColor {
 
 export function makeGroupKey(): string {
   return `g_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Recomputes the centroid from scratch using stored per-document embeddings.
+ * Returns null when no document has a valid embedding (e.g. migrated old data).
+ */
+export function recomputeCentroid(documents: GroupDocument[]): number[] | null {
+  const valid = documents
+    .map((d) => d.embedding)
+    .filter((e) => Array.isArray(e) && e.length > 0);
+  if (valid.length === 0) return null;
+  const dim = valid[0].length;
+  const sum = new Array<number>(dim).fill(0);
+  for (const emb of valid) {
+    for (let i = 0; i < dim; i++) sum[i] += emb[i];
+  }
+  return l2Normalize(sum.map((v) => v / valid.length));
 }

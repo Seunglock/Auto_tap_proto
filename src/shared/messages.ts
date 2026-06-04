@@ -1,4 +1,9 @@
-import type { ExtractedContent, GroupRecord, Settings } from "./types";
+import type {
+  CollectionSummary,
+  ExtractedContent,
+  GroupRecord,
+  Settings,
+} from "./types";
 
 export type ExtractRequest = {
   type: "EXTRACT";
@@ -51,6 +56,15 @@ export type UpdateGroupLabelRequest = {
   label: string;
 };
 
+export type GetSummaryRequest = {
+  type: "GET_SUMMARY";
+};
+
+export type GetSummaryResponse = {
+  type: "GET_SUMMARY_RESULT";
+  summary: CollectionSummary;
+};
+
 export type AnyMessage =
   | ExtractRequest
   | ReclassifyRequest
@@ -59,4 +73,5 @@ export type AnyMessage =
   | ResetAllRequest
   | GetSettingsRequest
   | UpdateSettingsRequest
-  | UpdateGroupLabelRequest;
+  | UpdateGroupLabelRequest
+  | GetSummaryRequest;

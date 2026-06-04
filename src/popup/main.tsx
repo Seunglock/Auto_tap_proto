@@ -3,12 +3,24 @@ import { createRoot } from "react-dom/client";
 import type {
   GetGroupsResponse,
   GetSettingsResponse,
+  GetSummaryResponse,
 } from "@/shared/messages";
-import type { GroupRecord, Settings } from "@/shared/types";
+import type { CollectionSummary, GroupRecord, Settings } from "@/shared/types";
+
+function relativeTime(ts: number | null): string {
+  if (!ts) return "";
+  const diff = Math.floor((Date.now() - ts) / 1000);
+  if (diff < 10) return "방금 전";
+  if (diff < 60) return `${diff}초 전`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+  return `${Math.floor(diff / 86400)}일 전`;
+}
 
 function Popup(): JSX.Element {
   const [groups, setGroups] = useState<GroupRecord[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [summary, setSummary] = useState<CollectionSummary | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -16,12 +28,20 @@ function Popup(): JSX.Element {
   }, []);
 
   async function loadAll(): Promise<void> {
-    const [gr, st] = await Promise.all([
-      chrome.runtime.sendMessage({ type: "GET_GROUPS" }) as Promise<GetGroupsResponse>,
-      chrome.runtime.sendMessage({ type: "GET_SETTINGS" }) as Promise<GetSettingsResponse>,
+    const [gr, st, su] = await Promise.all([
+      chrome.runtime.sendMessage({
+        type: "GET_GROUPS",
+      }) as Promise<GetGroupsResponse>,
+      chrome.runtime.sendMessage({
+        type: "GET_SETTINGS",
+      }) as Promise<GetSettingsResponse>,
+      chrome.runtime.sendMessage({
+        type: "GET_SUMMARY",
+      }) as Promise<GetSummaryResponse>,
     ]);
     setGroups(gr?.groups ?? []);
     setSettings(st?.settings ?? null);
+    setSummary(su?.summary ?? null);
   }
 
   async function toggleEnabled(enabled: boolean): Promise<void> {
@@ -60,6 +80,32 @@ function Popup(): JSX.Element {
         </label>
       </div>
 
+      {/* Summary card */}
+      {summary && summary.totalGroups > 0 && (
+        <div className="summary-card">
+          <div className="summary-stats">
+            <span className="summary-count">
+              탭 <strong>{summary.totalDocuments}</strong>개 · 그룹{" "}
+              <strong>{summary.totalGroups}</strong>개
+            </span>
+            {summary.lastUpdatedAt && (
+              <span className="summary-time">
+                {relativeTime(summary.lastUpdatedAt)}
+              </span>
+            )}
+          </div>
+          {summary.topKeywords.length > 0 && (
+            <div className="summary-keywords">
+              {summary.topKeywords.slice(0, 6).map((kw) => (
+                <span key={kw} className="keyword-tag">
+                  {kw}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="actions">
         <button
           className="primary"
@@ -75,15 +121,32 @@ function Popup(): JSX.Element {
         <div className="empty">아직 자동 그룹이 없습니다.</div>
       ) : (
         <ul className="group-list">
-          {groups.map((g) => (
-            <li key={g.groupKey} className="group-item">
-              <span className={`color-dot color-${g.color}`} />
-              <span className="group-label" title={g.label}>
-                {g.label}
-              </span>
-              <span className="group-count">{g.docCount}</span>
-            </li>
-          ))}
+          {groups.map((g) => {
+            const gs = summary?.groups.find((s) => s.groupKey === g.groupKey);
+            return (
+              <li key={g.groupKey} className="group-item">
+                <span className={`color-dot color-${g.color}`} />
+                <div className="group-body">
+                  <div className="group-header-row">
+                    <span className="group-label" title={g.label}>
+                      {g.label}
+                    </span>
+                    <span className="group-count">{g.docCount}</span>
+                  </div>
+                  {gs && gs.topKeywords.length > 0 && (
+                    <div className="group-keywords">
+                      {gs.topKeywords.slice(0, 3).join(" · ")}
+                    </div>
+                  )}
+                  {gs && gs.topDomains.length > 0 && (
+                    <div className="group-domains">
+                      {gs.topDomains.slice(0, 2).join(", ")}
+                    </div>
+                  )}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
 

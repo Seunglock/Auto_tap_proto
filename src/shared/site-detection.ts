@@ -38,3 +38,23 @@ export function cleanSearchEngineTitle(title: string): string {
   }
   return out.trim();
 }
+
+const AI_CHAT_HOSTS = [
+  "claude.ai",
+  "chatgpt.com",
+  "chat.openai.com",
+  "gemini.google.com",
+  "bard.google.com",
+];
+
+export function isAiChatHost(host: string): boolean {
+  return AI_CHAT_HOSTS.some((h) => host === h || host.endsWith("." + h));
+}
+
+export function isAiChatUrl(url: string): boolean {
+  try {
+    return isAiChatHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}

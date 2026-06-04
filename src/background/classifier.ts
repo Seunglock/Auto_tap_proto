@@ -1,16 +1,15 @@
+import { buildPassageText, embedText, hashString } from "./embedder";
 import {
-  buildPassageText,
-  cosineSimilarity,
-  embedText,
-  hashString,
-} from "./embedder";
-import {
-  findBestMatch,
   makeGroupKey,
   pickColor,
+  recomputeCentroid,
   updateCentroid,
 } from "./clustering";
 import { computeLabel, tokenize } from "./labeling";
+import { scoreGroups } from "./scoring";
+import type { GroupScore } from "./scoring";
+import { decideReclassification } from "./reclassification";
+import type { ReclassifyDecision } from "./reclassification";
 import {
   deleteGroup,
   getAllGroups,
@@ -19,7 +18,14 @@ import {
   saveGroup,
   saveTabState,
 } from "./storage";
-import type { ExtractedContent, GroupRecord, TabState } from "@/shared/types";
+import type {
+  ClassificationOptions,
+  ExtractedContent,
+  GroupDocument,
+  GroupRecord,
+  Settings,
+  TabState,
+} from "@/shared/types";
 import { MIN_CONTENT_TOKENS } from "@/shared/constants";
 import { isSearchEngineUrl } from "@/shared/site-detection";
 
@@ -29,12 +35,13 @@ export type ClassificationOutcome =
   | { kind: "skipped"; reason: string }
   | { kind: "joined"; groupKey: string; chromeGroupId: number }
   | { kind: "created"; groupKey: string; chromeGroupId: number }
-  | { kind: "updated-centroid"; groupKey: string };
+  | { kind: "updated-centroid"; groupKey: string }
+  | { kind: "ungrouped"; fromGroupKey: string };
 
 export async function classifyTab(
   tab: chrome.tabs.Tab,
   content: ExtractedContent,
-  options: { allowReassign?: boolean } = {},
+  options: ClassificationOptions = {},
 ): Promise<ClassificationOutcome> {
   if (typeof tab.id !== "number") {
     return { kind: "skipped", reason: "no-tab-id" };
@@ -46,11 +53,25 @@ export async function classifyTab(
     content.title,
     content.url,
     content.contentSnippet,
+    content.headings,
   );
   const tokens = tokenize(`${content.title} ${content.contentSnippet}`);
-  if (tokens.length < MIN_CONTENT_TOKENS && !options.allowReassign) {
-    await markPendingReclassify(tab.id, passageText);
+
+  if (tokens.length < MIN_CONTENT_TOKENS && !options.force) {
+    await markPendingReclassify(tab.id, passageText, content);
     return { kind: "skipped", reason: "insufficient-content" };
+  }
+
+  // Skip if content hash unchanged (avoids redundant embedding)
+  const tabState = await getTabState(tab.id);
+  const newHash = hashString(passageText);
+  if (
+    !options.force &&
+    options.reason !== "url-change" &&
+    tabState?.lastEmbeddingHash === newHash &&
+    tabState?.groupKey
+  ) {
+    return { kind: "skipped", reason: "no-content-change" };
   }
 
   const isSearchPage = isSearchEngineUrl(content.url);
@@ -58,50 +79,84 @@ export async function classifyTab(
   if (
     isSearchPage &&
     snippetLength < MIN_SEARCH_SNIPPET_CHARS &&
-    !options.allowReassign
+    !options.force
   ) {
-    await markPendingReclassify(tab.id, passageText);
-    console.log(
-      `[auto-tab-group] tab ${tab.id} → DEFERRED (search page, snippet=${snippetLength} chars)`,
-    );
+    await markPendingReclassify(tab.id, passageText, content);
     return { kind: "skipped", reason: "search-page-thin-content" };
   }
 
   const embedding = await embedText(passageText);
   const groups = await getAllGroups();
-  const match = findBestMatch(embedding, groups);
-  const tabState = await getTabState(tab.id);
-  const allowReassign = options.allowReassign ?? !tabState?.groupKey;
+  const scores = scoreGroups(embedding, content, groups);
+
+  const currentGroupKey = tabState?.groupKey ?? null;
+  const allowReassign = options.allowReassign ?? !currentGroupKey;
 
   logClassification(
     tab,
     content,
     passageText,
-    match,
-    embedding,
+    scores,
     groups,
     settings.threshold,
   );
 
-  if (match && match.similarity >= settings.threshold) {
-    const target = groups[match.groupKey];
+  // ── URL-change: hysteresis decision ──────────────────────────────────────
+  if (options.reason === "url-change" && currentGroupKey) {
+    const decision = decideReclassification(
+      currentGroupKey,
+      scores,
+      groups,
+      settings,
+    );
+    return applyDecision(
+      tab,
+      decision,
+      embedding,
+      tokens,
+      content,
+      passageText,
+      settings,
+    );
+  }
+
+  // ── Normal path ───────────────────────────────────────────────────────────
+  const bestMatch = scores[0] ?? null;
+
+  if (bestMatch && bestMatch.total >= settings.threshold) {
+    const target = groups[bestMatch.groupKey];
     if (allowReassign && target.chromeGroupId !== tab.groupId) {
       await joinChromeGroup(tab.id, target.chromeGroupId);
     }
-    await applyDocumentToGroup(target, tab.id, embedding, tokens, settings);
+    await applyDocumentToGroup(
+      target,
+      tab.id,
+      embedding,
+      tokens,
+      content,
+      settings,
+    );
     await updateLabelIfNeeded(target);
-    await persistTabState(tab.id, target.groupKey, passageText, content);
+    await persistTabState(tab.id, target.groupKey, passageText, content, {
+      urlDirty: false,
+    });
     return target.chromeGroupId === tab.groupId
       ? { kind: "updated-centroid", groupKey: target.groupKey }
-      : { kind: "joined", groupKey: target.groupKey, chromeGroupId: target.chromeGroupId };
+      : {
+          kind: "joined",
+          groupKey: target.groupKey,
+          chromeGroupId: target.chromeGroupId,
+        };
   }
 
   if (!allowReassign) {
     return { kind: "skipped", reason: "below-threshold-no-reassign" };
   }
 
-  const created = await createNewGroup(tab.id, embedding, tokens);
-  await persistTabState(tab.id, created.groupKey, passageText, content);
+  const created = await createNewGroup(tab.id, embedding, tokens, content);
+  await persistTabState(tab.id, created.groupKey, passageText, content, {
+    urlDirty: false,
+  });
   return {
     kind: "created",
     groupKey: created.groupKey,
@@ -109,36 +164,139 @@ export async function classifyTab(
   };
 }
 
+// ── Decision applier ─────────────────────────────────────────────────────────
+
+async function applyDecision(
+  tab: chrome.tabs.Tab,
+  decision: ReclassifyDecision,
+  embedding: number[],
+  tokens: string[],
+  content: ExtractedContent,
+  passageText: string,
+  settings: Settings,
+): Promise<ClassificationOutcome> {
+  const groups = await getAllGroups();
+
+  switch (decision.action) {
+    case "keep": {
+      const group = groups[decision.groupKey];
+      if (!group) return { kind: "skipped", reason: "group-gone" };
+      await applyDocumentToGroup(
+        group,
+        tab.id!,
+        embedding,
+        tokens,
+        content,
+        settings,
+      );
+      await updateLabelIfNeeded(group);
+      await persistTabState(tab.id!, decision.groupKey, passageText, content, {
+        urlDirty: false,
+      });
+      return { kind: "updated-centroid", groupKey: decision.groupKey };
+    }
+
+    case "move": {
+      const target = groups[decision.toGroupKey];
+      if (!target) return { kind: "skipped", reason: "target-group-gone" };
+      await removeTabFromGroup(tab.id!, decision.fromGroupKey);
+      await joinChromeGroup(tab.id!, target.chromeGroupId);
+      const freshGroups = await getAllGroups();
+      const freshTarget = freshGroups[decision.toGroupKey];
+      if (!freshTarget)
+        return { kind: "skipped", reason: "target-group-gone-after-remove" };
+      await applyDocumentToGroup(
+        freshTarget,
+        tab.id!,
+        embedding,
+        tokens,
+        content,
+        settings,
+      );
+      await updateLabelIfNeeded(freshTarget);
+      await persistTabState(
+        tab.id!,
+        decision.toGroupKey,
+        passageText,
+        content,
+        { urlDirty: false },
+      );
+      return {
+        kind: "joined",
+        groupKey: decision.toGroupKey,
+        chromeGroupId: target.chromeGroupId,
+      };
+    }
+
+    case "ungroup": {
+      await removeTabFromGroup(tab.id!, decision.fromGroupKey);
+      try {
+        await chrome.tabs.ungroup([tab.id!]);
+      } catch (err) {
+        console.warn("[auto-tab-group] ungroup failed", err);
+      }
+      await persistTabState(tab.id!, null, passageText, content, {
+        urlDirty: false,
+      });
+      return { kind: "ungrouped", fromGroupKey: decision.fromGroupKey };
+    }
+
+    case "create-new": {
+      if (decision.fromGroupKey) {
+        await removeTabFromGroup(tab.id!, decision.fromGroupKey);
+      }
+      const created = await createNewGroup(tab.id!, embedding, tokens, content);
+      await persistTabState(tab.id!, created.groupKey, passageText, content, {
+        urlDirty: false,
+      });
+      return {
+        kind: "created",
+        groupKey: created.groupKey,
+        chromeGroupId: created.chromeGroupId,
+      };
+    }
+
+    default:
+      return { kind: "skipped", reason: "deferred" };
+  }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function extractDomainFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
 function logClassification(
   tab: chrome.tabs.Tab,
   content: ExtractedContent,
   passageText: string,
-  match: { groupKey: string; similarity: number } | null,
-  embedding: number[],
+  scores: GroupScore[],
   groups: Record<string, GroupRecord>,
   threshold: number,
 ): void {
+  const best = scores[0];
   const decision =
-    match && match.similarity >= threshold
-      ? `JOIN "${groups[match.groupKey].label}" (${match.similarity.toFixed(3)})`
-      : `NEW (best=${match ? match.similarity.toFixed(3) : "n/a"} < ${threshold})`;
+    best && best.total >= threshold
+      ? `JOIN "${groups[best.groupKey]?.label}" (total=${best.total.toFixed(3)}, sem=${best.semantic.toFixed(3)})`
+      : `NEW (best=${best ? best.total.toFixed(3) : "n/a"} < ${threshold})`;
+
   console.groupCollapsed(`[auto-tab-group] tab ${tab.id} → ${decision}`);
   console.log("title:", content.title);
   console.log("url:", content.url);
   console.log("snippet(200):", content.contentSnippet?.slice(0, 200));
   console.log("passage(200):", passageText.slice(0, 200));
-  const entries = Object.entries(groups)
-    .map(([key, g]) => ({
-      key,
-      label: g.label,
-      sim: cosineSimilarity(embedding, g.centroid),
-    }))
-    .sort((a, b) => b.sim - a.sim);
-  if (entries.length > 0) {
-    console.log("similarities (top → bottom):");
-    for (const e of entries) {
-      const flag = e.sim >= threshold ? "✓" : " ";
-      console.log(`  ${flag} ${e.sim.toFixed(3)}  ${e.label}  [${e.key}]`);
+  if (scores.length > 0) {
+    console.log("scores:");
+    for (const s of scores) {
+      const flag = s.total >= threshold ? "✓" : " ";
+      console.log(
+        `  ${flag} total=${s.total.toFixed(3)} sem=${s.semantic.toFixed(3)} dom=${s.domain.toFixed(3)} tmp=${s.temporal.toFixed(3)}  ${groups[s.groupKey]?.label ?? s.groupKey}`,
+      );
     }
   }
   console.groupEnd();
@@ -149,20 +307,41 @@ async function applyDocumentToGroup(
   tabId: number,
   embedding: number[],
   tokens: string[],
+  content: ExtractedContent,
   settings: { maxDocsPerGroup: number },
 ): Promise<void> {
   group.centroid = updateCentroid(group.centroid, group.docCount, embedding);
   group.docCount += 1;
+
+  const domain = extractDomainFromUrl(content.url);
+  const newDoc: GroupDocument = {
+    tabId,
+    title: content.title ?? "",
+    url: content.url ?? "",
+    domain,
+    snippet: (content.contentSnippet ?? "").slice(0, 300),
+    tokens,
+    embedding: embedding.slice(),
+    collectedAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
   const existingIdx = group.documents.findIndex((d) => d.tabId === tabId);
   if (existingIdx >= 0) {
-    group.documents[existingIdx] = { tabId, tokens };
+    group.documents[existingIdx] = newDoc;
   } else {
-    group.documents.push({ tabId, tokens });
+    group.documents.push(newDoc);
     if (group.documents.length > settings.maxDocsPerGroup) {
       group.documents.shift();
     }
   }
+
+  if (domain) {
+    group.domains[domain] = (group.domains[domain] ?? 0) + 1;
+  }
+  group.lastActiveAt = Date.now();
   group.updatedAt = Date.now();
+
   await saveGroup(group);
 }
 
@@ -173,9 +352,7 @@ async function updateLabelIfNeeded(group: GroupRecord): Promise<void> {
     group.label = newLabel;
     await saveGroup(group);
     try {
-      await chrome.tabGroups.update(group.chromeGroupId, {
-        title: newLabel,
-      });
+      await chrome.tabGroups.update(group.chromeGroupId, { title: newLabel });
     } catch (err) {
       console.warn("[auto-tab-group] update label failed", err);
     }
@@ -186,26 +363,47 @@ async function createNewGroup(
   tabId: number,
   embedding: number[],
   tokens: string[],
+  content: ExtractedContent,
 ): Promise<GroupRecord> {
   const groupKey = makeGroupKey();
   const chromeGroupId = await chrome.tabs.group({ tabIds: [tabId] });
+  const domain = extractDomainFromUrl(content.url);
 
   const tempGroup: GroupRecord = {
     groupKey,
     chromeGroupId,
     centroid: embedding.slice(),
     docCount: 1,
-    documents: [{ tabId, tokens }],
+    documents: [
+      {
+        tabId,
+        title: content.title ?? "",
+        url: content.url ?? "",
+        domain,
+        snippet: (content.contentSnippet ?? "").slice(0, 300),
+        tokens,
+        embedding: embedding.slice(),
+        collectedAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+    ],
     label: tokens[0] ?? "새 그룹",
     color: "blue",
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    lastActiveAt: Date.now(),
+    domains: domain ? { [domain]: 1 } : {},
   };
+
   const allGroups = await getAllGroups();
-  const label = computeLabel(tempGroup, { ...allGroups, [groupKey]: tempGroup });
+  const label = computeLabel(tempGroup, {
+    ...allGroups,
+    [groupKey]: tempGroup,
+  });
   tempGroup.label = label || tempGroup.label;
   tempGroup.color = pickColor(tempGroup.label);
   await saveGroup(tempGroup);
+
   try {
     await chrome.tabGroups.update(chromeGroupId, {
       title: tempGroup.label,
@@ -214,6 +412,7 @@ async function createNewGroup(
   } catch (err) {
     console.warn("[auto-tab-group] create label failed", err);
   }
+
   return tempGroup;
 }
 
@@ -228,21 +427,60 @@ async function joinChromeGroup(
   }
 }
 
-async function persistTabState(
+/** Removes a tab from ONE specific group and recomputes that group's centroid. */
+async function removeTabFromGroup(
   tabId: number,
   groupKey: string,
+): Promise<void> {
+  const groups = await getAllGroups();
+  const group = groups[groupKey];
+  if (!group) return;
+
+  const idx = group.documents.findIndex((d) => d.tabId === tabId);
+  if (idx === -1) return;
+
+  group.documents.splice(idx, 1);
+  group.docCount = Math.max(0, group.docCount - 1);
+  group.updatedAt = Date.now();
+
+  if (group.documents.length === 0) {
+    await deleteGroup(groupKey);
+    try {
+      await chrome.tabGroups.update(group.chromeGroupId, { collapsed: false });
+    } catch {
+      /* already gone */
+    }
+    return;
+  }
+
+  const newCentroid = recomputeCentroid(group.documents);
+  if (newCentroid !== null) group.centroid = newCentroid;
+
+  await saveGroup(group);
+  await updateLabelIfNeeded(group);
+}
+
+async function persistTabState(
+  tabId: number,
+  groupKey: string | null,
   passageText: string,
   content: ExtractedContent,
+  extra?: { urlDirty?: boolean },
 ): Promise<void> {
   const settings = await getSettings();
   const isShortContent =
     (content.contentSnippet?.length ?? 0) < settings.reclassifyMinChars;
+  const existing = await getTabState(tabId);
   const state: TabState = {
     tabId,
     groupKey,
+    lastUrl: content.url ?? "",
     lastEmbeddingHash: hashString(passageText),
     pendingReclassify: isShortContent,
     lastClassifiedAt: Date.now(),
+    firstSeenAt: existing?.firstSeenAt ?? Date.now(),
+    navigationVersion: existing?.navigationVersion ?? 0,
+    urlDirty: extra?.urlDirty ?? false,
   };
   await saveTabState(state);
 }
@@ -250,14 +488,19 @@ async function persistTabState(
 async function markPendingReclassify(
   tabId: number,
   passageText: string,
+  content: ExtractedContent,
 ): Promise<void> {
   const existing = await getTabState(tabId);
   const state: TabState = {
     tabId,
     groupKey: existing?.groupKey ?? null,
+    lastUrl: existing?.lastUrl ?? content.url ?? "",
     lastEmbeddingHash: hashString(passageText),
     pendingReclassify: true,
     lastClassifiedAt: Date.now(),
+    firstSeenAt: existing?.firstSeenAt ?? Date.now(),
+    navigationVersion: existing?.navigationVersion ?? 0,
+    urlDirty: existing?.urlDirty ?? false,
   };
   await saveTabState(state);
 }
@@ -281,6 +524,7 @@ export async function removeTabFromGroups(tabId: number): Promise<void> {
     const group = groups[groupKey];
     const idx = group.documents.findIndex((d) => d.tabId === tabId);
     if (idx === -1) continue;
+
     group.documents.splice(idx, 1);
     group.docCount = Math.max(0, group.docCount - 1);
     group.updatedAt = Date.now();
@@ -289,19 +533,22 @@ export async function removeTabFromGroups(tabId: number): Promise<void> {
     if (group.documents.length === 0) {
       await deleteGroup(groupKey);
       try {
-        await chrome.tabGroups.update(group.chromeGroupId, { collapsed: false });
+        await chrome.tabGroups.update(group.chromeGroupId, {
+          collapsed: false,
+        });
       } catch {
-        // chrome group already gone
+        /* already gone */
       }
       continue;
     }
 
+    const newCentroid = recomputeCentroid(group.documents);
+    if (newCentroid !== null) group.centroid = newCentroid;
+
     await saveGroup(group);
     await updateLabelIfNeeded(group);
   }
-  if (touched) {
-    await rebalanceLabelsAcrossGroups();
-  }
+  if (touched) await rebalanceLabelsAcrossGroups();
 }
 
 async function rebalanceLabelsAcrossGroups(): Promise<void> {
