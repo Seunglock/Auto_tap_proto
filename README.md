@@ -80,4 +80,10 @@ src/
 ├── popup/           # 그룹 목록 + 토글 + 수동 정리 버튼
 ├── options/         # 임계값, 라벨 수정, 전체 초기화
 └── shared/          # 타입, 상수, 메시지 정의
+
+## 논문 링크
+
+https://ieeexplore.ieee.org/document/7498440
+https://ieeexplore.ieee.org/document/5197084
+https://ieeexplore.ieee.org/document/5190800
 ```
