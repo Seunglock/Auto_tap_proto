@@ -111,6 +111,7 @@ export async function classifyTab(
       scores,
       groups,
       settings,
+      { allowUngroup: options.allowUngroup },
     );
     return applyDecision(
       tab,
@@ -264,6 +265,13 @@ async function applyDecision(
       };
     }
 
+    case "defer": {
+      await persistTabState(tab.id!, decision.groupKey, passageText, content, {
+        urlDirty: false,
+      });
+      return { kind: "skipped", reason: "deferred" };
+    }
+
     default:
       return { kind: "skipped", reason: "deferred" };
   }
@@ -290,8 +298,8 @@ function logClassification(
   const best = scores[0];
   const decision =
     best && best.total >= threshold
-      ? `JOIN "${groups[best.groupKey]?.label}" (total=${best.total.toFixed(3)}, sem=${best.semantic.toFixed(3)})`
-      : `NEW (best=${best ? best.total.toFixed(3) : "n/a"} < ${threshold})`;
+      ? `candidate: JOIN "${groups[best.groupKey]?.label}" (total=${best.total.toFixed(3)}, sem=${best.semantic.toFixed(3)})`
+      : `candidate: NEW (best=${best ? best.total.toFixed(3) : "n/a"} < ${threshold})`;
 
   console.groupCollapsed(`[auto-tab-group] tab ${tab.id} → ${decision}`);
   console.log("title:", content.title);
