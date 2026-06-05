@@ -98,6 +98,15 @@ function Options(): JSX.Element {
           />
         </div>
         <div className="row">
+          <label htmlFor="groupMerge">유사 그룹 자동 병합</label>
+          <input
+            id="groupMerge"
+            type="checkbox"
+            checked={settings.groupMergeEnabled}
+            onChange={(e) => update({ groupMergeEnabled: e.target.checked })}
+          />
+        </div>
+        <div className="row">
           <label htmlFor="maxdocs">그룹당 최대 문서 수</label>
           <input
             id="maxdocs"

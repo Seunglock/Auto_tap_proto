@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reclassifyMinChars: 200,
   keepThreshold: 0.75,
   urlChangeReclassifyEnabled: true,
+  groupMergeEnabled: true,
 };
 
 export const TAB_GROUP_COLORS: TabGroupColor[] = [

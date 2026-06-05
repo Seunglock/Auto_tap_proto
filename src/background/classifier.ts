@@ -12,6 +12,7 @@ import { decideReclassification } from "./reclassification";
 import type { ReclassifyDecision } from "./reclassification";
 import {
   deleteGroup,
+  getAllTabStates,
   getAllGroups,
   getSettings,
   getTabState,
@@ -30,6 +31,8 @@ import { MIN_CONTENT_TOKENS } from "@/shared/constants";
 import { isSearchEngineUrl } from "@/shared/site-detection";
 
 const MIN_SEARCH_SNIPPET_CHARS = 80;
+const GROUP_MERGE_MIN_SEMANTIC = 0.85;
+const GROUP_MERGE_MAX_SEMANTIC_GAP = 0.08;
 
 export type ClassificationOutcome =
   | { kind: "skipped"; reason: string }
@@ -112,6 +115,7 @@ export async function classifyTab(
     return applyDecision(
       tab,
       decision,
+      scores,
       embedding,
       tokens,
       content,
@@ -140,6 +144,7 @@ export async function classifyTab(
     await persistTabState(tab.id, target.groupKey, passageText, content, {
       urlDirty: false,
     });
+    await maybeMergeSimilarGroups(scores, settings);
     return target.chromeGroupId === tab.groupId
       ? { kind: "updated-centroid", groupKey: target.groupKey }
       : {
@@ -169,6 +174,7 @@ export async function classifyTab(
 async function applyDecision(
   tab: chrome.tabs.Tab,
   decision: ReclassifyDecision,
+  scores: GroupScore[],
   embedding: number[],
   tokens: string[],
   content: ExtractedContent,
@@ -193,6 +199,7 @@ async function applyDecision(
       await persistTabState(tab.id!, decision.groupKey, passageText, content, {
         urlDirty: false,
       });
+      await maybeMergeSimilarGroups(scores, settings);
       return { kind: "updated-centroid", groupKey: decision.groupKey };
     }
 
@@ -221,6 +228,7 @@ async function applyDecision(
         content,
         { urlDirty: false },
       );
+      await maybeMergeSimilarGroups(scores, settings);
       return {
         kind: "joined",
         groupKey: decision.toGroupKey,
@@ -356,6 +364,185 @@ async function updateLabelIfNeeded(group: GroupRecord): Promise<void> {
     } catch (err) {
       console.warn("[auto-tab-group] update label failed", err);
     }
+  }
+}
+
+type MergeCandidate = {
+  targetKey: string;
+  sourceKey: string;
+  targetSemantic: number;
+  sourceSemantic: number;
+  semanticGap: number;
+};
+
+async function maybeMergeSimilarGroups(
+  scores: GroupScore[],
+  settings: Settings,
+): Promise<void> {
+  if (!settings.groupMergeEnabled) return;
+
+  const candidate = pickMergeCandidate(scores);
+  if (!candidate) return;
+
+  try {
+    await mergeGroups(candidate, settings);
+  } catch (err) {
+    console.warn("[auto-tab-group] merge similar groups failed", err);
+  }
+}
+
+function pickMergeCandidate(scores: GroupScore[]): MergeCandidate | null {
+  const [top, second] = scores;
+  if (!top || !second) return null;
+  if (top.groupKey === second.groupKey) return null;
+  if (
+    top.semantic < GROUP_MERGE_MIN_SEMANTIC ||
+    second.semantic < GROUP_MERGE_MIN_SEMANTIC
+  ) {
+    return null;
+  }
+
+  const semanticGap = Math.abs(top.semantic - second.semantic);
+  if (semanticGap > GROUP_MERGE_MAX_SEMANTIC_GAP) return null;
+
+  return {
+    targetKey: top.groupKey,
+    sourceKey: second.groupKey,
+    targetSemantic: top.semantic,
+    sourceSemantic: second.semantic,
+    semanticGap,
+  };
+}
+
+async function mergeGroups(
+  candidate: MergeCandidate,
+  settings: Settings,
+): Promise<void> {
+  const groups = await getAllGroups();
+  const target = groups[candidate.targetKey];
+  const source = groups[candidate.sourceKey];
+  if (!target || !source) return;
+  if (target.groupKey === source.groupKey) return;
+
+  const moved = await moveChromeGroupTabs(
+    source.chromeGroupId,
+    target.chromeGroupId,
+  );
+  if (!moved) return;
+
+  const merged = buildMergedGroup(target, source, settings);
+  const groupsForLabel = { ...groups, [merged.groupKey]: merged };
+  delete groupsForLabel[source.groupKey];
+  const nextLabel = computeLabel(merged, groupsForLabel);
+  if (nextLabel) {
+    merged.label = nextLabel;
+    merged.color = pickColor(nextLabel);
+  }
+
+  await saveGroup(merged);
+  await remapTabStates(source.groupKey, target.groupKey);
+  await deleteGroup(source.groupKey);
+
+  try {
+    await chrome.tabGroups.update(target.chromeGroupId, {
+      title: merged.label,
+      color: merged.color,
+    });
+  } catch (err) {
+    console.warn("[auto-tab-group] update merged group failed", err);
+  }
+
+  console.info(
+    `[auto-tab-group] merged similar groups "${source.label}" -> "${target.label}" ` +
+      `(sem=${candidate.sourceSemantic.toFixed(3)}->${candidate.targetSemantic.toFixed(3)}, gap=${candidate.semanticGap.toFixed(3)})`,
+  );
+}
+
+async function moveChromeGroupTabs(
+  sourceChromeGroupId: number,
+  targetChromeGroupId: number,
+): Promise<boolean> {
+  let sourceTabs: chrome.tabs.Tab[] = [];
+  try {
+    sourceTabs = await chrome.tabs.query({ groupId: sourceChromeGroupId });
+  } catch (err) {
+    console.warn("[auto-tab-group] query source group tabs failed", err);
+    return false;
+  }
+
+  const tabIds = sourceTabs
+    .map((tab) => tab.id)
+    .filter((id): id is number => typeof id === "number");
+  if (tabIds.length === 0) return true;
+
+  try {
+    await chrome.tabs.group({ tabIds, groupId: targetChromeGroupId });
+    return true;
+  } catch (err) {
+    console.warn("[auto-tab-group] move merged tabs failed", err);
+    return false;
+  }
+}
+
+function buildMergedGroup(
+  target: GroupRecord,
+  source: GroupRecord,
+  settings: Settings,
+): GroupRecord {
+  const documents = dedupeAndLimitDocuments(
+    [...target.documents, ...source.documents],
+    settings.maxDocsPerGroup,
+  );
+  const centroid = recomputeCentroid(documents) ?? target.centroid;
+
+  return {
+    ...target,
+    centroid,
+    documents,
+    docCount: documents.length,
+    createdAt: Math.min(target.createdAt, source.createdAt),
+    updatedAt: Math.max(target.updatedAt, source.updatedAt),
+    lastActiveAt: Math.max(target.lastActiveAt, source.lastActiveAt),
+    domains: mergeDomains(target.domains, source.domains),
+  };
+}
+
+function dedupeAndLimitDocuments(
+  documents: GroupDocument[],
+  maxDocsPerGroup: number,
+): GroupDocument[] {
+  const byTabId = new Map<number, GroupDocument>();
+  for (const doc of documents) {
+    const existing = byTabId.get(doc.tabId);
+    if (!existing || doc.updatedAt >= existing.updatedAt) {
+      byTabId.set(doc.tabId, doc);
+    }
+  }
+
+  return [...byTabId.values()]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, maxDocsPerGroup);
+}
+
+function mergeDomains(
+  targetDomains: Record<string, number>,
+  sourceDomains: Record<string, number>,
+): Record<string, number> {
+  const merged = { ...targetDomains };
+  for (const [domain, count] of Object.entries(sourceDomains)) {
+    merged[domain] = (merged[domain] ?? 0) + count;
+  }
+  return merged;
+}
+
+async function remapTabStates(
+  sourceGroupKey: string,
+  targetGroupKey: string,
+): Promise<void> {
+  const tabStates = await getAllTabStates();
+  for (const state of Object.values(tabStates)) {
+    if (state.groupKey !== sourceGroupKey) continue;
+    await saveTabState({ ...state, groupKey: targetGroupKey });
   }
 }
 

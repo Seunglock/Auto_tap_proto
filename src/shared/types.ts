@@ -86,6 +86,7 @@ export type Settings = {
   reclassifyMinChars: number;
   keepThreshold: number;
   urlChangeReclassifyEnabled: boolean;
+  groupMergeEnabled: boolean;
 };
 
 export type StorageSchema = {
