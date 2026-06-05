@@ -22,10 +22,11 @@ import type {
   GetSettingsResponse,
   GetSummaryResponse,
 } from "@/shared/messages";
-import type { ClassificationOptions } from "@/shared/types";
+import type { ClassificationOptions, TabState } from "@/shared/types";
 
 const debounceTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const DEBOUNCE_MS = 300;
+const URL_CHANGE_DEBOUNCE_MS = 1000;
 
 chrome.runtime.onInstalled.addListener(async () => {
   await pruneStaleChromeGroups();
@@ -44,12 +45,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // When the URL changes, mark the tab dirty so the next "complete" event
   // triggers a forced reclassification (even for already-grouped tabs).
   if (changeInfo.url) {
-    void handleUrlDirty(tabId, changeInfo.url);
+    void handleUrlDirty(tabId, changeInfo.url, tab);
   }
 
   if (changeInfo.status === "complete") {
     scheduleClassification(tabId, tab);
   }
+});
+
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  void handleWebNavigationUrlChange(details);
+});
+
+chrome.webNavigation.onReferenceFragmentUpdated.addListener((details) => {
+  void handleWebNavigationUrlChange(details);
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -120,29 +129,99 @@ chrome.runtime.onMessage.addListener(
 
 // ── URL dirty tracking ────────────────────────────────────────────────────────
 
-async function handleUrlDirty(tabId: number, newUrl: string): Promise<void> {
+async function handleWebNavigationUrlChange(
+  details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
+): Promise<void> {
+  if (details.frameId !== 0) return;
+
+  const markedDirty = await handleUrlDirty(details.tabId, details.url);
+  if (!markedDirty) return;
+
+  let tab: chrome.tabs.Tab;
+  try {
+    tab = await chrome.tabs.get(details.tabId);
+  } catch {
+    return;
+  }
+  scheduleClassification(details.tabId, tab, URL_CHANGE_DEBOUNCE_MS);
+}
+
+async function handleUrlDirty(
+  tabId: number,
+  newUrl: string,
+  tabHint?: chrome.tabs.Tab,
+): Promise<boolean> {
   const tabState = await getTabState(tabId);
-  // Only mark dirty if the tab was already classified in a group
-  if (!tabState?.groupKey) return;
+  const state = tabState?.groupKey
+    ? tabState
+    : await restoreGroupedTabState(tabId, tabHint);
+
+  // Only mark dirty if the tab belongs to an auto-managed group.
+  if (!state?.groupKey) return false;
   // Skip if URL hasn't actually changed
-  if (tabState.lastUrl === newUrl) return;
+  if (state.lastUrl === newUrl) return false;
 
   await saveTabState({
-    ...tabState,
+    ...state,
     urlDirty: true,
-    navigationVersion: (tabState.navigationVersion ?? 0) + 1,
+    navigationVersion: (state.navigationVersion ?? 0) + 1,
   });
+  return true;
+}
+
+async function restoreGroupedTabState(
+  tabId: number,
+  tabHint?: chrome.tabs.Tab,
+): Promise<TabState | null> {
+  let tab = tabHint;
+  if (!tab) {
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch {
+      return null;
+    }
+  }
+
+  if (
+    typeof tab.groupId !== "number" ||
+    tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE
+  ) {
+    return null;
+  }
+
+  const groups = await getAllGroups();
+  const group = Object.values(groups).find(
+    (candidate) => candidate.chromeGroupId === tab.groupId,
+  );
+  if (!group) return null;
+
+  const now = Date.now();
+  return {
+    tabId,
+    groupKey: group.groupKey,
+    lastUrl: "",
+    lastEmbeddingHash: "",
+    pendingReclassify: false,
+    lastClassifiedAt: now,
+    firstSeenAt: now,
+    navigationVersion: 0,
+    urlDirty: false,
+  };
 }
 
 // ── Classification scheduling ─────────────────────────────────────────────────
 
-function scheduleClassification(tabId: number, tab: chrome.tabs.Tab): void {
+function scheduleClassification(
+  tabId: number,
+  tab: chrome.tabs.Tab,
+  delayMs = DEBOUNCE_MS,
+): void {
   const existing = debounceTimers.get(tabId);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
     debounceTimers.delete(tabId);
     void runClassification(tabId, tab);
-  }, DEBOUNCE_MS);
+  }, delayMs);
   debounceTimers.set(tabId, timer);
 }
 

@@ -22,7 +22,7 @@ export default defineManifest({
       all_frames: false,
     },
   ],
-  permissions: ["tabs", "tabGroups", "storage", "scripting"],
+  permissions: ["tabs", "tabGroups", "storage", "scripting", "webNavigation"],
   content_security_policy: {
     extension_pages:
       "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
