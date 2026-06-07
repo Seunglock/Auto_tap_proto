@@ -10,6 +10,7 @@ import { scoreGroups } from "./scoring";
 import type { GroupScore } from "./scoring";
 import { decideReclassification } from "./reclassification";
 import type { ReclassifyDecision } from "./reclassification";
+import { recordDiaryEpisodeFromClassification } from "./diary";
 import {
   deleteGroup,
   getAllTabStates,
@@ -142,6 +143,7 @@ export async function classifyTab(
       settings,
     );
     await updateLabelIfNeeded(target);
+    await safeRecordDiaryEpisode(tab.id, target, content, tokens);
     await persistTabState(tab.id, target.groupKey, passageText, content, {
       urlDirty: false,
     });
@@ -160,6 +162,7 @@ export async function classifyTab(
   }
 
   const created = await createNewGroup(tab.id, embedding, tokens, content);
+  await safeRecordDiaryEpisode(tab.id, created, content, tokens);
   await persistTabState(tab.id, created.groupKey, passageText, content, {
     urlDirty: false,
   });
@@ -197,6 +200,7 @@ async function applyDecision(
         settings,
       );
       await updateLabelIfNeeded(group);
+      await safeRecordDiaryEpisode(tab.id!, group, content, tokens);
       await persistTabState(tab.id!, decision.groupKey, passageText, content, {
         urlDirty: false,
       });
@@ -222,6 +226,7 @@ async function applyDecision(
         settings,
       );
       await updateLabelIfNeeded(freshTarget);
+      await safeRecordDiaryEpisode(tab.id!, freshTarget, content, tokens);
       await persistTabState(
         tab.id!,
         decision.toGroupKey,
@@ -255,6 +260,7 @@ async function applyDecision(
         await removeTabFromGroup(tab.id!, decision.fromGroupKey);
       }
       const created = await createNewGroup(tab.id!, embedding, tokens, content);
+      await safeRecordDiaryEpisode(tab.id!, created, content, tokens);
       await persistTabState(tab.id!, created.groupKey, passageText, content, {
         urlDirty: false,
       });
@@ -619,6 +625,19 @@ async function joinChromeGroup(
     await chrome.tabs.group({ tabIds: [tabId], groupId: chromeGroupId });
   } catch (err) {
     console.warn("[auto-tab-group] join failed", err);
+  }
+}
+
+async function safeRecordDiaryEpisode(
+  tabId: number,
+  group: GroupRecord,
+  content: ExtractedContent,
+  tokens: string[],
+): Promise<void> {
+  try {
+    await recordDiaryEpisodeFromClassification({ tabId, group, content, tokens });
+  } catch (err) {
+    console.warn("[auto-tab-group] diary episode record failed", err);
   }
 }
 

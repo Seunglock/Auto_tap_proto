@@ -93,6 +93,9 @@ export type StorageSchema = {
   groups: Record<string, GroupRecord>;
   tabs: Record<number, TabState>;
   settings: Settings;
+  diaryEpisodes: Record<string, DiaryEpisode>;
+  diaryEntries: Record<string, DiaryEntry>;
+  diarySettings: DiarySettings;
 };
 
 export type ExtractedContent = {
@@ -124,4 +127,105 @@ export type CollectionSummary = {
   lastUpdatedAt: number | null;
   topKeywords: string[];
   groups: GroupSummary[];
+};
+
+// ── Diary types (browser history journal) ──────────────────────────────────
+
+export type DiaryCategoryKey = "dev" | "ent" | "news" | "life" | "sens";
+
+export type DiaryEpisodeSource =
+  | "classified-tab"
+  | "history-backfill"
+  | "history-fallback";
+
+export type DiaryDurationSource = "observed" | "estimated";
+
+export type DiaryEpisode = {
+  id: string;
+  dateKey: string;
+  startedAt: number;
+  durationMs: number;
+  durationSource: DiaryDurationSource;
+  title: string;
+  url: string;
+  domain: string;
+  snippet: string;
+  groupKey: string | null;
+  groupLabel: string;
+  keywords: string[];
+  tokens: string[];
+  categoryKey: DiaryCategoryKey;
+  isSensitive: boolean;
+  source: DiaryEpisodeSource;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type DiaryEntry = {
+  dateKey: string;
+  summary: string;
+  body: string;
+  tags: string[];
+  sourceEpisodeIds: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type DiaryGroupSummary = {
+  groupKey: string | null;
+  label: string;
+  count: number;
+  keywords: string[];
+  categoryKey: DiaryCategoryKey;
+};
+
+export type DiaryDomainSummary = {
+  domain: string;
+  count: number;
+};
+
+export type DiaryStats = {
+  totalEpisodes: number;
+  safeEpisodes: number;
+  sensitiveEpisodes: number;
+  activeMinutes: number;
+};
+
+export type DiaryDay = {
+  dateKey: string;
+  episodes: DiaryEpisode[];
+  topKeywords: string[];
+  topGroups: DiaryGroupSummary[];
+  topDomains: DiaryDomainSummary[];
+  stats: DiaryStats;
+  entry: DiaryEntry | null;
+};
+
+export type DiaryWeekDay = {
+  dateKey: string;
+  label: string;
+  stats: DiaryStats;
+  topGroups: DiaryGroupSummary[];
+  topKeywords: string[];
+};
+
+export type DiaryWeek = {
+  startDateKey: string;
+  endDateKey: string;
+  days: DiaryWeekDay[];
+};
+
+export type DiaryAnalysis = {
+  dateKey: string;
+  week: DiaryWeek;
+  topKeywords: Array<{ keyword: string; count: number }>;
+  topGroups: DiaryGroupSummary[];
+  recommendations: Array<{ title: string; body: string; tags: string[] }>;
+};
+
+export type DiarySettings = {
+  collectionEnabled: boolean;
+  sensitiveFilterEnabled: boolean;
+  backfillDays: number;
+  geminiApiKey: string;
 };

@@ -16,8 +16,23 @@ import {
 } from "./storage";
 import { warmupEmbedder } from "./embedder";
 import { buildCollectionSummary } from "./summarizer";
+import {
+  backfillHistory,
+  generateDiaryEntry,
+  getDiaryAnalysis,
+  getDiaryDay,
+  getDiarySettings,
+  getDiaryWeek,
+  updateDiarySettings,
+} from "./diary";
 import type {
   AnyMessage,
+  BackfillHistoryResponse,
+  GenerateDiaryEntryResponse,
+  GetDiaryAnalysisResponse,
+  GetDiaryDayResponse,
+  GetDiarySettingsResponse,
+  GetDiaryWeekResponse,
   GetGroupsResponse,
   GetSettingsResponse,
   GetSummaryResponse,
@@ -343,6 +358,58 @@ async function handleMessage(
         summary,
       };
       return response;
+    }
+    case "GET_DIARY_DAY": {
+      const day = await getDiaryDay(message.dateKey);
+      const response: GetDiaryDayResponse = {
+        type: "GET_DIARY_DAY_RESULT",
+        day,
+      };
+      return response;
+    }
+    case "GET_DIARY_WEEK": {
+      const week = await getDiaryWeek(message.dateKey);
+      const response: GetDiaryWeekResponse = {
+        type: "GET_DIARY_WEEK_RESULT",
+        week,
+      };
+      return response;
+    }
+    case "GET_DIARY_ANALYSIS": {
+      const analysis = await getDiaryAnalysis(message.dateKey);
+      const response: GetDiaryAnalysisResponse = {
+        type: "GET_DIARY_ANALYSIS_RESULT",
+        analysis,
+      };
+      return response;
+    }
+    case "GENERATE_DIARY_ENTRY": {
+      const entry = await generateDiaryEntry(message.dateKey);
+      const response: GenerateDiaryEntryResponse = {
+        type: "GENERATE_DIARY_ENTRY_RESULT",
+        entry,
+      };
+      return response;
+    }
+    case "BACKFILL_HISTORY": {
+      const importedCount = await backfillHistory(message.days);
+      const response: BackfillHistoryResponse = {
+        type: "BACKFILL_HISTORY_RESULT",
+        importedCount,
+      };
+      return response;
+    }
+    case "GET_DIARY_SETTINGS": {
+      const settings = await getDiarySettings();
+      const response: GetDiarySettingsResponse = {
+        type: "GET_DIARY_SETTINGS_RESULT",
+        settings,
+      };
+      return response;
+    }
+    case "UPDATE_DIARY_SETTINGS": {
+      const settings = await updateDiarySettings(message.settings);
+      return { ok: true, settings };
     }
     case "UPDATE_SETTINGS": {
       const settings = await updateSettings(message.settings);

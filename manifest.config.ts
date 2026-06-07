@@ -22,7 +22,14 @@ export default defineManifest({
       all_frames: false,
     },
   ],
-  permissions: ["tabs", "tabGroups", "storage", "scripting", "webNavigation"],
+  permissions: [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "scripting",
+    "webNavigation",
+    "history",
+  ],
   content_security_policy: {
     extension_pages:
       "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
@@ -31,6 +38,7 @@ export default defineManifest({
     "<all_urls>",
     "https://huggingface.co/*",
     "https://cdn.jsdelivr.net/*",
+    "https://generativelanguage.googleapis.com/*",
   ],
   web_accessible_resources: [
     {

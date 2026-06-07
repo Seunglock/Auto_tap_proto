@@ -1,5 +1,10 @@
 import type {
   CollectionSummary,
+  DiaryAnalysis,
+  DiaryDay,
+  DiaryEntry,
+  DiarySettings,
+  DiaryWeek,
   ExtractedContent,
   GroupRecord,
   Settings,
@@ -65,6 +70,70 @@ export type GetSummaryResponse = {
   summary: CollectionSummary;
 };
 
+export type GetDiaryDayRequest = {
+  type: "GET_DIARY_DAY";
+  dateKey?: string;
+};
+
+export type GetDiaryDayResponse = {
+  type: "GET_DIARY_DAY_RESULT";
+  day: DiaryDay;
+};
+
+export type GetDiaryWeekRequest = {
+  type: "GET_DIARY_WEEK";
+  dateKey?: string;
+};
+
+export type GetDiaryWeekResponse = {
+  type: "GET_DIARY_WEEK_RESULT";
+  week: DiaryWeek;
+};
+
+export type GetDiaryAnalysisRequest = {
+  type: "GET_DIARY_ANALYSIS";
+  dateKey?: string;
+};
+
+export type GetDiaryAnalysisResponse = {
+  type: "GET_DIARY_ANALYSIS_RESULT";
+  analysis: DiaryAnalysis;
+};
+
+export type GenerateDiaryEntryRequest = {
+  type: "GENERATE_DIARY_ENTRY";
+  dateKey?: string;
+};
+
+export type GenerateDiaryEntryResponse = {
+  type: "GENERATE_DIARY_ENTRY_RESULT";
+  entry: DiaryEntry;
+};
+
+export type BackfillHistoryRequest = {
+  type: "BACKFILL_HISTORY";
+  days?: number;
+};
+
+export type BackfillHistoryResponse = {
+  type: "BACKFILL_HISTORY_RESULT";
+  importedCount: number;
+};
+
+export type GetDiarySettingsRequest = {
+  type: "GET_DIARY_SETTINGS";
+};
+
+export type GetDiarySettingsResponse = {
+  type: "GET_DIARY_SETTINGS_RESULT";
+  settings: DiarySettings;
+};
+
+export type UpdateDiarySettingsRequest = {
+  type: "UPDATE_DIARY_SETTINGS";
+  settings: Partial<DiarySettings>;
+};
+
 export type AnyMessage =
   | ExtractRequest
   | ReclassifyRequest
@@ -74,4 +143,11 @@ export type AnyMessage =
   | GetSettingsRequest
   | UpdateSettingsRequest
   | UpdateGroupLabelRequest
-  | GetSummaryRequest;
+  | GetSummaryRequest
+  | GetDiaryDayRequest
+  | GetDiaryWeekRequest
+  | GetDiaryAnalysisRequest
+  | GenerateDiaryEntryRequest
+  | BackfillHistoryRequest
+  | GetDiarySettingsRequest
+  | UpdateDiarySettingsRequest;

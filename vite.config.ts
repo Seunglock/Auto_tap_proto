@@ -15,6 +15,9 @@ export default defineConfig({
     target: "esnext",
     sourcemap: true,
     rollupOptions: {
+      input: {
+        diary: path.resolve(__dirname, "src/diary/index.html"),
+      },
       output: {
         chunkFileNames: "assets/[name]-[hash].js",
       },

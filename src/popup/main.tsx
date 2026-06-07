@@ -66,6 +66,12 @@ function Popup(): JSX.Element {
     chrome.runtime.openOptionsPage();
   }
 
+  function openDiary(): void {
+    void chrome.tabs.create({
+      url: chrome.runtime.getURL("src/diary/index.html"),
+    });
+  }
+
   return (
     <div className="container">
       <div className="header">
@@ -107,6 +113,9 @@ function Popup(): JSX.Element {
       )}
 
       <div className="actions">
+        <button className="secondary" onClick={openDiary}>
+          오늘의 일기 열기
+        </button>
         <button
           className="primary"
           onClick={regroupAll}

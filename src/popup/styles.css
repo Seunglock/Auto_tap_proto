@@ -61,6 +61,16 @@ body {
     background: #f0f0f0;
 }
 
+.actions button.secondary {
+    color: #5b2e91;
+    border-color: #e5d6f2;
+    background: #fbf7ff;
+}
+
+.actions button.secondary:hover {
+    background: #f2e9fb;
+}
+
 .actions button.primary {
     background: #1d6cf3;
     color: #fff;
