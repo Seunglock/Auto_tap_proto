@@ -91,6 +91,7 @@ function App(): JSX.Element {
   const [settings, setSettings] = useState<DiarySettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("불러오는 중");
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
 
   useEffect(() => {
     void initialLoad();
@@ -107,6 +108,7 @@ function App(): JSX.Element {
         type: "GET_DIARY_SETTINGS",
       })) as GetDiarySettingsResponse;
       setSettings(st.settings);
+      setApiKeyDraft(st.settings.geminiApiKey);
       const res = (await chrome.runtime.sendMessage({
         type: "BACKFILL_HISTORY",
         days: st.settings.backfillDays,
@@ -152,6 +154,15 @@ function App(): JSX.Element {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function saveDiarySettings(): Promise<void> {
+    const res = (await chrome.runtime.sendMessage({
+      type: "UPDATE_DIARY_SETTINGS",
+      settings: { geminiApiKey: apiKeyDraft.trim() },
+    })) as { ok: boolean; settings: DiarySettings };
+    setSettings(res.settings);
+    setStatus("설정 저장 완료");
   }
 
   const railDates = useMemo(() => {
@@ -225,7 +236,13 @@ function App(): JSX.Element {
         />
       )}
       {view === "analysis" && analysis && (
-        <AnalysisView analysis={analysis} settings={settings} />
+        <AnalysisView
+          analysis={analysis}
+          settings={settings}
+          apiKeyDraft={apiKeyDraft}
+          onApiKeyDraft={setApiKeyDraft}
+          onSaveSettings={saveDiarySettings}
+        />
       )}
     </div>
   );
@@ -478,6 +495,9 @@ function BoardView(props: {
 function AnalysisView(props: {
   analysis: DiaryAnalysis;
   settings: DiarySettings | null;
+  apiKeyDraft: string;
+  onApiKeyDraft: (value: string) => void;
+  onSaveSettings: () => void;
 }): JSX.Element {
   const total = Math.max(
     1,
@@ -558,22 +578,19 @@ function AnalysisView(props: {
           <div>
             <div className="sec-k">생성 엔진</div>
             <p>
-              일기 생성과 분석이 모두 기기 안의 로컬 모델에서 처리됩니다.
-              활동 내용은 외부 서버로 전송되지 않습니다.
+              Gemini 우선으로 일기를 생성하고, 키가 없거나 실패하면 로컬
+              모델(Ollama·EXAONE)로 폴백합니다.
             </p>
           </div>
-          <div className="engine-block">
-            <div className="engine-status">
-              <span className="engine-dot" aria-hidden="true" />
-              <span>로컬 엑사원 (Ollama) · 외부 전송 0%</span>
-            </div>
-            {props.settings ? (
-              <p className="engine-note">
-                최근 {props.settings.backfillDays}일 방문 기록을 로컬에서
-                분석합니다.
-              </p>
-            ) : null}
-          </div>
+          <input
+            type="password"
+            value={props.apiKeyDraft}
+            placeholder="Gemini API key (폴백용)"
+            onChange={(event) => props.onApiKeyDraft(event.target.value)}
+          />
+          <button onClick={props.onSaveSettings}>
+            {props.settings?.geminiApiKey ? "키 업데이트" : "키 저장"}
+          </button>
         </section>
       </div>
     </main>
