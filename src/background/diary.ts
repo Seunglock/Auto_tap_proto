@@ -1,7 +1,8 @@
-import { hashString } from "./embedder";
+import { cosineSimilarity, embedText, hashString } from "./embedder";
 import { tokenize } from "./labeling";
 import { getAllGroups, getTabState } from "./storage";
 import { isInternalUrl, isLocalHost } from "./tab-filters";
+import { E5_PASSAGE_PREFIX, E5_QUERY_PREFIX } from "@/shared/constants";
 import type {
   DiaryAnalysis,
   DiaryCategoryKey,
@@ -334,9 +335,15 @@ export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
   const settings = await getDiarySettings();
   const day = await getDiaryDay(target);
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
+  // RAG: 오늘 활동을 쿼리로 과거 일기를 e5 임베딩 검색해 생성 맥락으로 주입
+  const memories = await retrieveDiaryMemories(day, target);
+  console.log(
+    "[auto-tab-group] diary RAG 검색 결과",
+    memories.length ? memories : "(관련 과거 기록 없음)",
+  );
   const generated =
     settings.geminiApiKey.trim().length > 0
-      ? await generateWithGemini(day, settings.geminiApiKey)
+      ? await generateWithGemini(day, settings.geminiApiKey, memories)
       : null;
   const fallback = generated ?? buildRuleBasedEntry(day);
   const now = Date.now();
@@ -577,9 +584,81 @@ function buildRuleBasedEntry(day: DiaryDay): Pick<DiaryEntry, "summary" | "body"
   };
 }
 
+const RAG_RECENT_DAYS = 14;
+const RAG_TOP_K = 2;
+const RAG_MIN_SIMILARITY = 0.78;
+
+function buildMemoryQuery(day: DiaryDay): string {
+  const groups = day.topGroups.map((group) => group.label).join(" ");
+  const keywords = day.topKeywords.slice(0, 8).join(" ");
+  const titles = day.episodes
+    .filter((episode) => !episode.isSensitive)
+    .slice(0, 6)
+    .map((episode) => episode.title)
+    .join(" ");
+  return [groups, keywords, titles].filter(Boolean).join(" ").trim();
+}
+
+function formatMemory(entry: DiaryEntry): string {
+  const summary = entry.summary.replace(/["\n]/g, " ").trim();
+  const body = entry.body.replace(/\s+/g, " ").trim();
+  return `${formatKoreanDate(entry.dateKey)}: ${summary} ${body}`.slice(0, 240);
+}
+
+// 오늘 활동을 쿼리로, 과거 일기를 코퍼스로 삼아 RAG 검색 (e5 코사인 → 키워드 폴백)
+async function retrieveDiaryMemories(
+  day: DiaryDay,
+  target: string,
+): Promise<string[]> {
+  const entries = await getAllDiaryEntries();
+  const past = Object.values(entries)
+    .filter((entry) => entry.dateKey < target)
+    .sort((a, b) => (a.dateKey < b.dateKey ? 1 : -1))
+    .slice(0, RAG_RECENT_DAYS);
+  const queryText = buildMemoryQuery(day);
+  if (past.length === 0 || !queryText) return [];
+
+  try {
+    const queryVec = await embedText(E5_QUERY_PREFIX + queryText);
+    const scored = await Promise.all(
+      past.map(async (entry) => ({
+        entry,
+        score: cosineSimilarity(
+          queryVec,
+          await embedText(E5_PASSAGE_PREFIX + formatMemory(entry)),
+        ),
+      })),
+    );
+    const top = scored
+      .filter((item) => item.score >= RAG_MIN_SIMILARITY)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, RAG_TOP_K);
+    if (top.length > 0) return top.map((item) => formatMemory(item.entry));
+  } catch (err) {
+    console.warn("[auto-tab-group] diary RAG 임베딩 실패 → 키워드 폴백", err);
+  }
+
+  // 폴백: 쿼리와 과거 일기 토큰 겹침 상위 K개
+  const queryTokens = new Set(tokenize(queryText));
+  return past
+    .map((entry) => {
+      const tokens = tokenize(
+        `${entry.summary} ${entry.body} ${entry.tags.join(" ")}`,
+      );
+      let overlap = 0;
+      for (const token of tokens) if (queryTokens.has(token)) overlap += 1;
+      return { entry, overlap };
+    })
+    .filter((item) => item.overlap > 0)
+    .sort((a, b) => b.overlap - a.overlap)
+    .slice(0, RAG_TOP_K)
+    .map((item) => formatMemory(item.entry));
+}
+
 async function generateWithGemini(
   day: DiaryDay,
   apiKey: string,
+  memories: string[] = [],
 ): Promise<Pick<DiaryEntry, "summary" | "body" | "tags"> | null> {
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
   if (safeEpisodes.length === 0) return null;
@@ -595,10 +674,18 @@ async function generateWithGemini(
     domains: day.topDomains.map((domain) => domain.domain),
     keywords: day.topKeywords,
   };
+  const memoryBlock =
+    memories.length > 0
+      ? "\n\n# 지난 며칠의 기록 (참고용 맥락)\n" +
+        memories.map((m) => `- ${m}`).join("\n") +
+        "\n오늘과 자연스럽게 이어지는 흐름이 보이면 한 번 짚어줘도 좋아. 단, 억지로 끌어오거나 없는 일을 지어내지는 마."
+      : "";
   const prompt =
-    "다음 브라우저 활동 요약만 사용해서 한국어 일기를 작성해줘. " +
-    "민감한 항목은 이미 제외되어 있으니 추측하지 마. JSON으로만 응답하고 키는 summary, body, tags를 써. " +
-    JSON.stringify(payload);
+    "다음 '오늘 활동 요약'을 바탕으로 한국어 일기를 작성해줘. " +
+    "민감한 항목은 이미 제외되어 있으니 추측하지 마. JSON으로만 응답하고 키는 summary, body, tags를 써.\n\n" +
+    "# 오늘 활동 요약\n" +
+    JSON.stringify(payload) +
+    memoryBlock;
 
   try {
     const url =
