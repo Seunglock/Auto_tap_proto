@@ -655,6 +655,72 @@ async function retrieveDiaryMemories(
     .map((item) => formatMemory(item.entry));
 }
 
+const DIARY_PROFILE = {
+  name: "나",
+  persona: "개발과 AI를 공부하는 사람",
+  tone: "담백하고 솔직한 반말체",
+} as const;
+
+function categoryDistribution(episodes: DiaryEpisode[]): string {
+  const counts = new Map<DiaryCategoryKey, number>();
+  for (const ep of episodes) {
+    counts.set(ep.categoryKey, (counts.get(ep.categoryKey) ?? 0) + 1);
+  }
+  const total = episodes.length || 1;
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(
+      ([key, n]) =>
+        `${CATEGORY_META[key].label} ${Math.round((n / total) * 100)}%`,
+    )
+    .join(", ");
+}
+
+// 한결식 상세 프롬프트 — 역할·페르소나·작법 가이드 + RAG 맥락
+function buildDiaryPrompt(day: DiaryDay, memories: string[]): string {
+  const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
+  const list = safeEpisodes
+    .slice(0, 20)
+    .map((ep) => `- ${ep.title} · ${CATEGORY_META[ep.categoryKey].label}`)
+    .join("\n");
+  const catLine = categoryDistribution(safeEpisodes);
+  const ragBlock =
+    memories.length > 0
+      ? "\n# 지난 며칠의 기록 (참고용)\n" +
+        memories.map((m) => "- " + m).join("\n") +
+        "\n오늘과 자연스럽게 이어지는 흐름이 보이면 한 번 짚어줘도 좋아. 단, 억지로 끌어오지는 마.\n"
+      : "";
+  return `# 역할
+너는 ${DIARY_PROFILE.name}의 하루를 대신 적어주는 일기 작가다. 활동 로그 요약이나 보고서가 아니라, 직접 펜을 든 것처럼 쓰는 한 편의 일기다.
+
+# ${DIARY_PROFILE.name}에 대하여
+${DIARY_PROFILE.persona}. 일기 말투는 ${DIARY_PROFILE.tone}로, 처음부터 끝까지 일관되게.
+
+# 오늘(${formatKoreanDate(day.dateKey)}) 모인 활동
+${list}
+관심 분포 — ${catLine}
+민감한 활동은 이미 제외됐다. 목록에 없는 일을 지어내지 마라.
+${ragBlock}
+# 쓰는 방법
+- 1인칭 '나' 시점, 세 문단. 각 문단 3~4문장.
+- 활동을 나열하지 마라. '무엇을 했나'가 아니라 '그 시간이 어떻게 흘렀고 무엇이 남았나'를 써라.
+- 서비스·도구 이름은 꼭 필요할 때만 한두 개. "GitHub에서 PR을 봤다"보다 "막힌 코드를 한참 붙들고 있었다"에 가깝게.
+- 하루의 리듬(아침 → 낮 → 저녁)이나 마음의 결을 따라 자연스럽게 이어라.
+- 과장, 억지 교훈, 작위적 마무리 금지. 담담하게 끝나도 좋다.
+
+# summary
+그날 전체를 관통하는 한 문장. 큰따옴표로 감싼다. 활동 요약이 아니라 그날의 정수.
+예) "막힌 걸 풀어낸 감각으로 하루가 흘러갔다."
+
+# tags
+오늘을 대표하는 2~4개. 활동 묶음이나 그날의 분위기. 반드시 한국어로 쓴다.
+
+# 출력
+아래 JSON만 출력하라. 다른 텍스트는 절대 쓰지 마라.
+{"summary":"...","body":"첫 문단\\n\\n둘째 문단\\n\\n셋째 문단","tags":["...","..."]}`;
+}
+
 async function generateWithLocalLLM(
   day: DiaryDay,
   memories: string[] = [],
@@ -662,29 +728,7 @@ async function generateWithLocalLLM(
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
   if (safeEpisodes.length === 0) return null;
 
-  const payload = {
-    date: day.dateKey,
-    groups: day.topGroups.map((group) => ({
-      label: group.label,
-      keywords: group.keywords,
-      count: group.count,
-    })),
-    titles: safeEpisodes.slice(0, 20).map((episode) => episode.title),
-    domains: day.topDomains.map((domain) => domain.domain),
-    keywords: day.topKeywords,
-  };
-  const memoryBlock =
-    memories.length > 0
-      ? "\n\n# 지난 며칠의 기록 (참고용 맥락)\n" +
-        memories.map((m) => `- ${m}`).join("\n") +
-        "\n오늘과 자연스럽게 이어지는 흐름이 보이면 한 번 짚어줘도 좋아. 단, 억지로 끌어오거나 없는 일을 지어내지는 마."
-      : "";
-  const prompt =
-    "다음 '오늘 활동 요약'을 바탕으로 한국어 일기를 작성해줘. " +
-    "민감한 항목은 이미 제외되어 있으니 추측하지 마. JSON으로만 응답하고 키는 summary, body, tags를 써.\n\n" +
-    "# 오늘 활동 요약\n" +
-    JSON.stringify(payload) +
-    memoryBlock;
+  const prompt = buildDiaryPrompt(day, memories);
 
   try {
     const res = await fetch(OLLAMA_URL, {
