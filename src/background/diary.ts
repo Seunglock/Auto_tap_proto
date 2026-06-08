@@ -28,7 +28,6 @@ const DEFAULT_DIARY_SETTINGS: DiarySettings = {
   collectionEnabled: true,
   sensitiveFilterEnabled: true,
   backfillDays: 7,
-  geminiApiKey: "",
 };
 
 const CATEGORY_META: Record<
