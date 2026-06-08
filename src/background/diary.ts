@@ -332,7 +332,6 @@ export async function getDiaryAnalysis(date?: string): Promise<DiaryAnalysis> {
 
 export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
   const target = date ?? dateKey(Date.now());
-  const settings = await getDiarySettings();
   const day = await getDiaryDay(target);
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
   // RAG: 오늘 활동을 쿼리로 과거 일기를 e5 임베딩 검색해 생성 맥락으로 주입
@@ -341,10 +340,7 @@ export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
     "[auto-tab-group] diary RAG 검색 결과",
     memories.length ? memories : "(관련 과거 기록 없음)",
   );
-  const generated =
-    settings.geminiApiKey.trim().length > 0
-      ? await generateWithGemini(day, settings.geminiApiKey, memories)
-      : null;
+  const generated = await generateWithLocalLLM(day, memories);
   const fallback = generated ?? buildRuleBasedEntry(day);
   const now = Date.now();
   const entry: DiaryEntry = {
@@ -588,6 +584,10 @@ const RAG_RECENT_DAYS = 14;
 const RAG_TOP_K = 2;
 const RAG_MIN_SIMILARITY = 0.78;
 
+// 로컬 LLM (Ollama + EXAONE). 생성이 기기 안에서 처리됨 — 외부 전송 0%
+const OLLAMA_URL = "http://localhost:11434/api/generate";
+const OLLAMA_MODEL = "exaone3.5:7.8b";
+
 function buildMemoryQuery(day: DiaryDay): string {
   const groups = day.topGroups.map((group) => group.label).join(" ");
   const keywords = day.topKeywords.slice(0, 8).join(" ");
@@ -655,9 +655,8 @@ async function retrieveDiaryMemories(
     .map((item) => formatMemory(item.entry));
 }
 
-async function generateWithGemini(
+async function generateWithLocalLLM(
   day: DiaryDay,
-  apiKey: string,
   memories: string[] = [],
 ): Promise<Pick<DiaryEntry, "summary" | "body" | "tags"> | null> {
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
@@ -688,22 +687,20 @@ async function generateWithGemini(
     memoryBlock;
 
   try {
-    const url =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
-      encodeURIComponent(apiKey);
-    const res = await fetch(url, {
+    const res = await fetch(OLLAMA_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false,
+        format: "json", // 유효한 JSON만 출력하도록 강제
+        options: { temperature: 0.8 },
       }),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    const parsed = parseJsonObject(text);
+    const data = (await res.json()) as { response?: string };
+    const parsed = parseJsonObject(data.response ?? "");
     if (!parsed) return null;
     return {
       summary: String(parsed.summary ?? ""),
@@ -713,7 +710,7 @@ async function generateWithGemini(
         : day.topKeywords.slice(0, 4),
     };
   } catch (err) {
-    console.warn("[auto-tab-group] diary Gemini generation failed", err);
+    console.warn("[auto-tab-group] diary local LLM generation failed", err);
     return null;
   }
 }
