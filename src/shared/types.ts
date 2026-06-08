@@ -227,4 +227,5 @@ export type DiarySettings = {
   collectionEnabled: boolean;
   sensitiveFilterEnabled: boolean;
   backfillDays: number;
+  geminiApiKey: string;
 };

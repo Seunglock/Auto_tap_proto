@@ -28,6 +28,7 @@ const DEFAULT_DIARY_SETTINGS: DiarySettings = {
   collectionEnabled: true,
   sensitiveFilterEnabled: true,
   backfillDays: 7,
+  geminiApiKey: "",
 };
 
 const CATEGORY_META: Record<
@@ -331,6 +332,7 @@ export async function getDiaryAnalysis(date?: string): Promise<DiaryAnalysis> {
 
 export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
   const target = date ?? dateKey(Date.now());
+  const settings = await getDiarySettings();
   const day = await getDiaryDay(target);
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
   // RAG: 오늘 활동을 쿼리로 과거 일기를 e5 임베딩 검색해 생성 맥락으로 주입
@@ -339,7 +341,22 @@ export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
     "[auto-tab-group] diary RAG 검색 결과",
     memories.length ? memories : "(관련 과거 기록 없음)",
   );
-  const generated = await generateWithLocalLLM(day, memories);
+  // 우선순위에 따라 시도 → 첫 성공 사용, 둘 다 실패하면 규칙기반
+  const attempts =
+    GENERATION_PRIMARY === "gemini"
+      ? [
+          () => generateWithGemini(day, settings.geminiApiKey, memories),
+          () => generateWithLocalLLM(day, memories),
+        ]
+      : [
+          () => generateWithLocalLLM(day, memories),
+          () => generateWithGemini(day, settings.geminiApiKey, memories),
+        ];
+  let generated: Pick<DiaryEntry, "summary" | "body" | "tags"> | null = null;
+  for (const attempt of attempts) {
+    generated = await attempt();
+    if (generated) break;
+  }
   const fallback = generated ?? buildRuleBasedEntry(day);
   const now = Date.now();
   const entry: DiaryEntry = {
@@ -587,6 +604,10 @@ const RAG_MIN_SIMILARITY = 0.78;
 const OLLAMA_URL = "http://localhost:11434/api/generate";
 const OLLAMA_MODEL = "exaone3.5:7.8b";
 
+// 생성 우선순위 — "gemini": Gemini 우선·로컬 폴백 / "local": 로컬 우선·Gemini 폴백
+// 둘 다 실패하면 규칙기반으로 폴백. RAG 맥락은 어느 경로든 동일하게 주입됨.
+const GENERATION_PRIMARY: "gemini" | "local" = "gemini";
+
 function buildMemoryQuery(day: DiaryDay): string {
   const groups = day.topGroups.map((group) => group.label).join(" ");
   const keywords = day.topKeywords.slice(0, 8).join(" ");
@@ -754,6 +775,47 @@ async function generateWithLocalLLM(
     };
   } catch (err) {
     console.warn("[auto-tab-group] diary local LLM generation failed", err);
+    return null;
+  }
+}
+
+// Gemini 폴백 경로 — 로컬과 동일한 한결 프롬프트(RAG 포함) 사용. 키 없으면 폴백 진행
+async function generateWithGemini(
+  day: DiaryDay,
+  apiKey: string,
+  memories: string[] = [],
+): Promise<Pick<DiaryEntry, "summary" | "body" | "tags"> | null> {
+  const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
+  if (safeEpisodes.length === 0) return null;
+  if (!apiKey || apiKey.trim().length === 0) return null;
+
+  const prompt = buildDiaryPrompt(day, memories);
+
+  try {
+    const url =
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
+      encodeURIComponent(apiKey);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const parsed = parseJsonObject(text);
+    if (!parsed) return null;
+    return {
+      summary: String(parsed.summary ?? ""),
+      body: String(parsed.body ?? ""),
+      tags: Array.isArray(parsed.tags)
+        ? parsed.tags.map(String).slice(0, 6)
+        : day.topKeywords.slice(0, 4),
+    };
+  } catch (err) {
+    console.warn("[auto-tab-group] diary Gemini generation failed", err);
     return null;
   }
 }
