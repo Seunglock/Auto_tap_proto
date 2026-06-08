@@ -38,7 +38,7 @@ export default defineManifest({
     "<all_urls>",
     "https://huggingface.co/*",
     "https://cdn.jsdelivr.net/*",
-    "https://generativelanguage.googleapis.com/*",
+    "http://localhost:11434/*",
   ],
   web_accessible_resources: [
     {

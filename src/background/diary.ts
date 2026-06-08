@@ -1,7 +1,8 @@
-import { hashString } from "./embedder";
+import { cosineSimilarity, embedText, hashString } from "./embedder";
 import { tokenize } from "./labeling";
 import { getAllGroups, getTabState } from "./storage";
 import { isInternalUrl, isLocalHost } from "./tab-filters";
+import { E5_PASSAGE_PREFIX, E5_QUERY_PREFIX } from "@/shared/constants";
 import type {
   DiaryAnalysis,
   DiaryCategoryKey,
@@ -27,7 +28,6 @@ const DEFAULT_DIARY_SETTINGS: DiarySettings = {
   collectionEnabled: true,
   sensitiveFilterEnabled: true,
   backfillDays: 7,
-  geminiApiKey: "",
 };
 
 const CATEGORY_META: Record<
@@ -331,13 +331,15 @@ export async function getDiaryAnalysis(date?: string): Promise<DiaryAnalysis> {
 
 export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
   const target = date ?? dateKey(Date.now());
-  const settings = await getDiarySettings();
   const day = await getDiaryDay(target);
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
-  const generated =
-    settings.geminiApiKey.trim().length > 0
-      ? await generateWithGemini(day, settings.geminiApiKey)
-      : null;
+  // RAG: 오늘 활동을 쿼리로 과거 일기를 e5 임베딩 검색해 생성 맥락으로 주입
+  const memories = await retrieveDiaryMemories(day, target);
+  console.log(
+    "[auto-tab-group] diary RAG 검색 결과",
+    memories.length ? memories : "(관련 과거 기록 없음)",
+  );
+  const generated = await generateWithLocalLLM(day, memories);
   const fallback = generated ?? buildRuleBasedEntry(day);
   const now = Date.now();
   const entry: DiaryEntry = {
@@ -577,46 +579,171 @@ function buildRuleBasedEntry(day: DiaryDay): Pick<DiaryEntry, "summary" | "body"
   };
 }
 
-async function generateWithGemini(
+const RAG_RECENT_DAYS = 14;
+const RAG_TOP_K = 2;
+const RAG_MIN_SIMILARITY = 0.78;
+
+// 로컬 LLM (Ollama + EXAONE). 생성이 기기 안에서 처리됨 — 외부 전송 0%
+const OLLAMA_URL = "http://localhost:11434/api/generate";
+const OLLAMA_MODEL = "exaone3.5:7.8b";
+
+function buildMemoryQuery(day: DiaryDay): string {
+  const groups = day.topGroups.map((group) => group.label).join(" ");
+  const keywords = day.topKeywords.slice(0, 8).join(" ");
+  const titles = day.episodes
+    .filter((episode) => !episode.isSensitive)
+    .slice(0, 6)
+    .map((episode) => episode.title)
+    .join(" ");
+  return [groups, keywords, titles].filter(Boolean).join(" ").trim();
+}
+
+function formatMemory(entry: DiaryEntry): string {
+  const summary = entry.summary.replace(/["\n]/g, " ").trim();
+  const body = entry.body.replace(/\s+/g, " ").trim();
+  return `${formatKoreanDate(entry.dateKey)}: ${summary} ${body}`.slice(0, 240);
+}
+
+// 오늘 활동을 쿼리로, 과거 일기를 코퍼스로 삼아 RAG 검색 (e5 코사인 → 키워드 폴백)
+async function retrieveDiaryMemories(
   day: DiaryDay,
-  apiKey: string,
+  target: string,
+): Promise<string[]> {
+  const entries = await getAllDiaryEntries();
+  const past = Object.values(entries)
+    .filter((entry) => entry.dateKey < target)
+    .sort((a, b) => (a.dateKey < b.dateKey ? 1 : -1))
+    .slice(0, RAG_RECENT_DAYS);
+  const queryText = buildMemoryQuery(day);
+  if (past.length === 0 || !queryText) return [];
+
+  try {
+    const queryVec = await embedText(E5_QUERY_PREFIX + queryText);
+    const scored = await Promise.all(
+      past.map(async (entry) => ({
+        entry,
+        score: cosineSimilarity(
+          queryVec,
+          await embedText(E5_PASSAGE_PREFIX + formatMemory(entry)),
+        ),
+      })),
+    );
+    const top = scored
+      .filter((item) => item.score >= RAG_MIN_SIMILARITY)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, RAG_TOP_K);
+    if (top.length > 0) return top.map((item) => formatMemory(item.entry));
+  } catch (err) {
+    console.warn("[auto-tab-group] diary RAG 임베딩 실패 → 키워드 폴백", err);
+  }
+
+  // 폴백: 쿼리와 과거 일기 토큰 겹침 상위 K개
+  const queryTokens = new Set(tokenize(queryText));
+  return past
+    .map((entry) => {
+      const tokens = tokenize(
+        `${entry.summary} ${entry.body} ${entry.tags.join(" ")}`,
+      );
+      let overlap = 0;
+      for (const token of tokens) if (queryTokens.has(token)) overlap += 1;
+      return { entry, overlap };
+    })
+    .filter((item) => item.overlap > 0)
+    .sort((a, b) => b.overlap - a.overlap)
+    .slice(0, RAG_TOP_K)
+    .map((item) => formatMemory(item.entry));
+}
+
+const DIARY_PROFILE = {
+  name: "나",
+  persona: "개발과 AI를 공부하는 사람",
+  tone: "담백하고 솔직한 반말체",
+} as const;
+
+function categoryDistribution(episodes: DiaryEpisode[]): string {
+  const counts = new Map<DiaryCategoryKey, number>();
+  for (const ep of episodes) {
+    counts.set(ep.categoryKey, (counts.get(ep.categoryKey) ?? 0) + 1);
+  }
+  const total = episodes.length || 1;
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(
+      ([key, n]) =>
+        `${CATEGORY_META[key].label} ${Math.round((n / total) * 100)}%`,
+    )
+    .join(", ");
+}
+
+// 한결식 상세 프롬프트 — 역할·페르소나·작법 가이드 + RAG 맥락
+function buildDiaryPrompt(day: DiaryDay, memories: string[]): string {
+  const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
+  const list = safeEpisodes
+    .slice(0, 20)
+    .map((ep) => `- ${ep.title} · ${CATEGORY_META[ep.categoryKey].label}`)
+    .join("\n");
+  const catLine = categoryDistribution(safeEpisodes);
+  const ragBlock =
+    memories.length > 0
+      ? "\n# 지난 며칠의 기록 (참고용)\n" +
+        memories.map((m) => "- " + m).join("\n") +
+        "\n오늘과 자연스럽게 이어지는 흐름이 보이면 한 번 짚어줘도 좋아. 단, 억지로 끌어오지는 마.\n"
+      : "";
+  return `# 역할
+너는 ${DIARY_PROFILE.name}의 하루를 대신 적어주는 일기 작가다. 활동 로그 요약이나 보고서가 아니라, 직접 펜을 든 것처럼 쓰는 한 편의 일기다.
+
+# ${DIARY_PROFILE.name}에 대하여
+${DIARY_PROFILE.persona}. 일기 말투는 ${DIARY_PROFILE.tone}로, 처음부터 끝까지 일관되게.
+
+# 오늘(${formatKoreanDate(day.dateKey)}) 모인 활동
+${list}
+관심 분포 — ${catLine}
+민감한 활동은 이미 제외됐다. 목록에 없는 일을 지어내지 마라.
+${ragBlock}
+# 쓰는 방법
+- 1인칭 '나' 시점, 세 문단. 각 문단 3~4문장.
+- 활동을 나열하지 마라. '무엇을 했나'가 아니라 '그 시간이 어떻게 흘렀고 무엇이 남았나'를 써라.
+- 서비스·도구 이름은 꼭 필요할 때만 한두 개. "GitHub에서 PR을 봤다"보다 "막힌 코드를 한참 붙들고 있었다"에 가깝게.
+- 하루의 리듬(아침 → 낮 → 저녁)이나 마음의 결을 따라 자연스럽게 이어라.
+- 과장, 억지 교훈, 작위적 마무리 금지. 담담하게 끝나도 좋다.
+
+# summary
+그날 전체를 관통하는 한 문장. 큰따옴표로 감싼다. 활동 요약이 아니라 그날의 정수.
+예) "막힌 걸 풀어낸 감각으로 하루가 흘러갔다."
+
+# tags
+오늘을 대표하는 2~4개. 활동 묶음이나 그날의 분위기. 반드시 한국어로 쓴다.
+
+# 출력
+아래 JSON만 출력하라. 다른 텍스트는 절대 쓰지 마라.
+{"summary":"...","body":"첫 문단\\n\\n둘째 문단\\n\\n셋째 문단","tags":["...","..."]}`;
+}
+
+async function generateWithLocalLLM(
+  day: DiaryDay,
+  memories: string[] = [],
 ): Promise<Pick<DiaryEntry, "summary" | "body" | "tags"> | null> {
   const safeEpisodes = day.episodes.filter((episode) => !episode.isSensitive);
   if (safeEpisodes.length === 0) return null;
 
-  const payload = {
-    date: day.dateKey,
-    groups: day.topGroups.map((group) => ({
-      label: group.label,
-      keywords: group.keywords,
-      count: group.count,
-    })),
-    titles: safeEpisodes.slice(0, 20).map((episode) => episode.title),
-    domains: day.topDomains.map((domain) => domain.domain),
-    keywords: day.topKeywords,
-  };
-  const prompt =
-    "다음 브라우저 활동 요약만 사용해서 한국어 일기를 작성해줘. " +
-    "민감한 항목은 이미 제외되어 있으니 추측하지 마. JSON으로만 응답하고 키는 summary, body, tags를 써. " +
-    JSON.stringify(payload);
+  const prompt = buildDiaryPrompt(day, memories);
 
   try {
-    const url =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
-      encodeURIComponent(apiKey);
-    const res = await fetch(url, {
+    const res = await fetch(OLLAMA_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false,
+        format: "json", // 유효한 JSON만 출력하도록 강제
+        options: { temperature: 0.8 },
       }),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    const parsed = parseJsonObject(text);
+    const data = (await res.json()) as { response?: string };
+    const parsed = parseJsonObject(data.response ?? "");
     if (!parsed) return null;
     return {
       summary: String(parsed.summary ?? ""),
@@ -626,7 +753,7 @@ async function generateWithGemini(
         : day.topKeywords.slice(0, 4),
     };
   } catch (err) {
-    console.warn("[auto-tab-group] diary Gemini generation failed", err);
+    console.warn("[auto-tab-group] diary local LLM generation failed", err);
     return null;
   }
 }
