@@ -7,13 +7,16 @@ import type {
   GetDiaryDayResponse,
   GetDiarySettingsResponse,
   GetDiaryWeekResponse,
+  SaveDiaryEntryResponse,
 } from "@/shared/messages";
 import type {
   DiaryAnalysis,
   DiaryCategoryKey,
   DiaryDay,
   DiaryEpisode,
+  DiaryFontFamily,
   DiarySettings,
+  DiaryTextFormat,
   DiaryWeek,
 } from "@/shared/types";
 import aliceUrl from "./assets/alice.png";
@@ -37,6 +40,32 @@ const CATEGORY_COLORS: Record<DiaryCategoryKey, string> = {
   life: "#A8D8B8",
   sens: "#E8C090",
 };
+
+const DEFAULT_ENTRY_FORMAT: DiaryTextFormat = {
+  fontFamily: "system",
+  fontSize: 15,
+  textColor: "#5a4570",
+};
+
+const FONT_STYLE_MAP: Record<DiaryFontFamily, string> = {
+  system:
+    '-apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif',
+  serif: 'Georgia, "Noto Serif KR", serif',
+  gothic: '"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif',
+  handwriting: '"Segoe Print", "Nanum Pen Script", cursive',
+  mono: '"JetBrains Mono", "Consolas", monospace',
+};
+
+const COLOR_PRESETS = [
+  "#3d2459",
+  "#1a1a2e",
+  "#4a4a4a",
+  "#6b3fa0",
+  "#5c3d2e",
+  "#1e3a5f",
+  "#166534",
+  "#991b1b",
+];
 
 function todayKey(): string {
   return dateKey(Date.now());
@@ -165,6 +194,29 @@ function App(): JSX.Element {
     setStatus("설정 저장 완료");
   }
 
+  async function saveDiaryEntryPatch(patch: {
+    summary?: string;
+    body?: string;
+    tags?: string[];
+    format?: DiaryTextFormat;
+  }): Promise<void> {
+    if (!day?.entry) return;
+    const res = (await chrome.runtime.sendMessage({
+      type: "SAVE_DIARY_ENTRY",
+      dateKey: day.entry.dateKey,
+      patch,
+    })) as SaveDiaryEntryResponse;
+    setDay((prev) =>
+      prev
+        ? {
+            ...prev,
+            entry: res.entry,
+          }
+        : prev,
+    );
+    setStatus("일기 편집 저장 완료");
+  }
+
   const railDates = useMemo(() => {
     if (week) return week.days.map((d) => d.dateKey);
     return [-3, -2, -1, 0].map((offset) => addDays(selectedDate, offset));
@@ -217,6 +269,7 @@ function App(): JSX.Element {
           onPrev={() => setSelectedDate(addDays(selectedDate, -1))}
           onNext={() => setSelectedDate(addDays(selectedDate, 1))}
           onGenerate={generateEntry}
+          onSaveEntry={saveDiaryEntryPatch}
           busy={busy}
         />
       )}
@@ -256,12 +309,65 @@ function EntryView(props: {
   onPrev: () => void;
   onNext: () => void;
   onGenerate: () => void;
+  onSaveEntry: (patch: {
+    summary?: string;
+    body?: string;
+    tags?: string[];
+    format?: DiaryTextFormat;
+  }) => Promise<void>;
   busy: boolean;
 }): JSX.Element {
   const { day } = props;
   const categoryTotal = Math.max(1, day.episodes.length);
   const categoryCounts = countCategories(day.episodes);
   const entry = day.entry;
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [bodyDraft, setBodyDraft] = useState("");
+  const [tagsDraft, setTagsDraft] = useState<string[]>([]);
+  const [formatDraft, setFormatDraft] =
+    useState<DiaryTextFormat>(DEFAULT_ENTRY_FORMAT);
+
+  useEffect(() => {
+    if (!entry || isEditing) return;
+    setBodyDraft(entry.body);
+    setTagsDraft(entry.tags);
+    setFormatDraft(entry.format ?? DEFAULT_ENTRY_FORMAT);
+  }, [entry, isEditing]);
+
+  function startEdit(): void {
+    if (!entry) return;
+    setBodyDraft(entry.body);
+    setTagsDraft(entry.tags);
+    setFormatDraft(entry.format ?? DEFAULT_ENTRY_FORMAT);
+    setIsEditing(true);
+  }
+
+  function cancelEdit(): void {
+    setIsEditing(false);
+    if (!entry) return;
+    setBodyDraft(entry.body);
+    setTagsDraft(entry.tags);
+    setFormatDraft(entry.format ?? DEFAULT_ENTRY_FORMAT);
+  }
+
+  async function saveEdit(): Promise<void> {
+    if (!entry) return;
+    setIsSaving(true);
+    try {
+      await props.onSaveEntry({
+        body: bodyDraft,
+        tags: tagsDraft,
+        format: formatDraft,
+      });
+      setIsEditing(false);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  const entryFormat = entry?.format ?? DEFAULT_ENTRY_FORMAT;
 
   return (
     <main className="stage entry-stage">
@@ -279,7 +385,8 @@ function EntryView(props: {
             <div className="l-datebig">{shortDate(day.dateKey)}</div>
             <div className="l-dow">{dayName(day.dateKey)}</div>
             <div className="l-summary">
-              {entry?.summary ?? `"${day.topGroups[0]?.label ?? "오늘"}"\n기록을 모으는 중.`}
+              {entry?.summary ??
+                `"${day.topGroups[0]?.label ?? "오늘"}"\n기록을 모으는 중.`}
             </div>
             <div className="l-block">
               <div className="l-label">Auto Tab Group keywords</div>
@@ -337,15 +444,68 @@ function EntryView(props: {
               <EmptyDay />
             ) : entry ? (
               <>
-                <div className="r-head">오늘의 일기</div>
-                <div className="r-body">{entry.body}</div>
-                <div className="tags">
-                  {entry.tags.map((tag) => (
-                    <span key={tag} className="tag">
-                      #{tag}
-                    </span>
-                  ))}
+                <div className="r-head-row">
+                  <div className="r-head">오늘의 일기</div>
+                  {!isEditing && (
+                    <button className="btn-edit" onClick={startEdit}>
+                      ✎ 편집
+                    </button>
+                  )}
                 </div>
+
+                {isEditing ? (
+                  <>
+                    <FormatToolbar
+                      value={formatDraft}
+                      onChange={setFormatDraft}
+                    />
+                    <textarea
+                      className="r-editor"
+                      value={bodyDraft}
+                      onChange={(e) => setBodyDraft(e.target.value)}
+                      style={{
+                        fontFamily: FONT_STYLE_MAP[formatDraft.fontFamily],
+                        fontSize: `${formatDraft.fontSize}px`,
+                        color: formatDraft.textColor,
+                      }}
+                    />
+                    <TagEditor tags={tagsDraft} onChange={setTagsDraft} />
+                    <div className="edit-actions">
+                      <button className="btn-cancel" onClick={cancelEdit}>
+                        취소
+                      </button>
+                      <button
+                        className="btn-save"
+                        onClick={() => {
+                          void saveEdit();
+                        }}
+                        disabled={isSaving}
+                      >
+                        {isSaving ? "저장 중..." : "저장"}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div
+                      className="r-body"
+                      style={{
+                        fontFamily: FONT_STYLE_MAP[entryFormat.fontFamily],
+                        fontSize: `${entryFormat.fontSize}px`,
+                        color: entryFormat.textColor,
+                      }}
+                    >
+                      {entry.body}
+                    </div>
+                    <div className="tags">
+                      {entry.tags.map((tag) => (
+                        <span key={tag} className="tag">
+                          #{tag}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                )}
               </>
             ) : (
               <div className="empty">
@@ -377,6 +537,126 @@ function EntryView(props: {
   );
 }
 
+function FormatToolbar(props: {
+  value: DiaryTextFormat;
+  onChange: (next: DiaryTextFormat) => void;
+}): JSX.Element {
+  return (
+    <div className="fmt-toolbar">
+      <select
+        className="fmt-select"
+        value={props.value.fontFamily}
+        onChange={(e) =>
+          props.onChange({
+            ...props.value,
+            fontFamily: e.target.value as DiaryFontFamily,
+          })
+        }
+      >
+        <option value="system">기본</option>
+        <option value="serif">명조</option>
+        <option value="gothic">고딕</option>
+        <option value="handwriting">손글씨</option>
+        <option value="mono">코드체</option>
+      </select>
+
+      <select
+        className="fmt-select"
+        value={props.value.fontSize}
+        onChange={(e) =>
+          props.onChange({ ...props.value, fontSize: Number(e.target.value) })
+        }
+      >
+        {[12, 13, 14, 15, 16, 17, 18, 20, 22, 24].map((size) => (
+          <option key={size} value={size}>
+            {size}px
+          </option>
+        ))}
+      </select>
+
+      <div className="fmt-colors">
+        {COLOR_PRESETS.map((color) => (
+          <button
+            key={color}
+            type="button"
+            className={`fmt-color ${props.value.textColor === color ? "active" : ""}`}
+            style={{ background: color }}
+            onClick={() => props.onChange({ ...props.value, textColor: color })}
+            aria-label={`색상 ${color}`}
+            title={color}
+          />
+        ))}
+        <label className="fmt-color-custom" title="직접 색상 선택">
+          🎨
+          <input
+            type="color"
+            value={props.value.textColor}
+            onChange={(e) =>
+              props.onChange({ ...props.value, textColor: e.target.value })
+            }
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function TagEditor(props: {
+  tags: string[];
+  onChange: (tags: string[]) => void;
+}): JSX.Element {
+  const [tagInput, setTagInput] = useState("");
+
+  function addTag(): void {
+    const normalized = tagInput.trim().replace(/^#/, "");
+    if (!normalized) return;
+    if (!props.tags.includes(normalized)) {
+      props.onChange([...props.tags, normalized]);
+    }
+    setTagInput("");
+  }
+
+  function removeTag(tag: string): void {
+    props.onChange(props.tags.filter((t) => t !== tag));
+  }
+
+  return (
+    <div className="tag-editor">
+      <div className="tag-edit-list">
+        {props.tags.map((tag) => (
+          <span key={tag} className="tag-edit-chip">
+            #{tag}
+            <button
+              type="button"
+              onClick={() => removeTag(tag)}
+              aria-label="태그 제거"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="tag-input-row">
+        <input
+          type="text"
+          placeholder="태그 추가"
+          value={tagInput}
+          onChange={(e) => setTagInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addTag();
+            }
+          }}
+        />
+        <button type="button" onClick={addTag}>
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TimelineView(props: {
   day: DiaryDay;
   railDates: string[];
@@ -390,7 +670,9 @@ function TimelineView(props: {
     <main className="timeline-wrap">
       <div className="section-head">
         <div>
-          <h1>{shortDate(props.day.dateKey)} {dayName(props.day.dateKey)}</h1>
+          <h1>
+            {shortDate(props.day.dateKey)} {dayName(props.day.dateKey)}
+          </h1>
           <p>방문 밀도와 Auto Tab Group 주제를 시간순으로 봅니다.</p>
         </div>
       </div>
@@ -420,7 +702,9 @@ function TimelineView(props: {
         </div>
         <div className="xrow">
           {bins.map((bin) => (
-            <span key={bin.hour}>{bin.hour % 3 === 0 ? `${bin.hour}:00` : ""}</span>
+            <span key={bin.hour}>
+              {bin.hour % 3 === 0 ? `${bin.hour}:00` : ""}
+            </span>
           ))}
         </div>
       </section>
@@ -440,7 +724,8 @@ function BoardView(props: {
         <div>
           <h1>이번 주의 흐름</h1>
           <p>
-            {shortDate(props.week.startDateKey)} – {shortDate(props.week.endDateKey)}
+            {shortDate(props.week.startDateKey)} –{" "}
+            {shortDate(props.week.endDateKey)}
           </p>
         </div>
       </div>
@@ -481,7 +766,8 @@ function BoardView(props: {
                   >
                     {CATEGORY_LABELS[group.categoryKey]}
                   </span>
-                  {group.label} {group.count > 1 ? `외 ${group.count - 1}건` : ""}
+                  {group.label}{" "}
+                  {group.count > 1 ? `외 ${group.count - 1}건` : ""}
                 </div>
               ))
             )}
@@ -645,7 +931,9 @@ function EpisodeList(props: { episodes: DiaryEpisode[] }): JSX.Element {
             <div className="pmeta">
               <span
                 className="ptag"
-                style={{ background: `${CATEGORY_COLORS[episode.categoryKey]}33` }}
+                style={{
+                  background: `${CATEGORY_COLORS[episode.categoryKey]}33`,
+                }}
               >
                 {episode.isSensitive ? "민감 · 가림" : episode.groupLabel}
               </span>

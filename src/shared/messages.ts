@@ -4,6 +4,7 @@ import type {
   DiaryDay,
   DiaryEntry,
   DiarySettings,
+  DiaryTextFormat,
   DiaryWeek,
   ExtractedContent,
   GroupRecord,
@@ -134,6 +135,22 @@ export type UpdateDiarySettingsRequest = {
   settings: Partial<DiarySettings>;
 };
 
+export type SaveDiaryEntryRequest = {
+  type: "SAVE_DIARY_ENTRY";
+  dateKey: string;
+  patch: {
+    summary?: string;
+    body?: string;
+    tags?: string[];
+    format?: DiaryTextFormat;
+  };
+};
+
+export type SaveDiaryEntryResponse = {
+  type: "SAVE_DIARY_ENTRY_RESULT";
+  entry: DiaryEntry;
+};
+
 export type AnyMessage =
   | ExtractRequest
   | ReclassifyRequest
@@ -150,4 +167,5 @@ export type AnyMessage =
   | GenerateDiaryEntryRequest
   | BackfillHistoryRequest
   | GetDiarySettingsRequest
-  | UpdateDiarySettingsRequest;
+  | UpdateDiarySettingsRequest
+  | SaveDiaryEntryRequest;

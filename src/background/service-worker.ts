@@ -24,6 +24,7 @@ import {
   getDiarySettings,
   getDiaryWeek,
   updateDiarySettings,
+  saveDiaryEntry,
 } from "./diary";
 import type {
   AnyMessage,
@@ -36,6 +37,7 @@ import type {
   GetGroupsResponse,
   GetSettingsResponse,
   GetSummaryResponse,
+  SaveDiaryEntryResponse,
 } from "@/shared/messages";
 import type { ClassificationOptions, TabState } from "@/shared/types";
 
@@ -410,6 +412,14 @@ async function handleMessage(
     case "UPDATE_DIARY_SETTINGS": {
       const settings = await updateDiarySettings(message.settings);
       return { ok: true, settings };
+    }
+    case "SAVE_DIARY_ENTRY": {
+      const entry = await saveDiaryEntry(message.dateKey, message.patch);
+      const response: SaveDiaryEntryResponse = {
+        type: "SAVE_DIARY_ENTRY_RESULT",
+        entry,
+      };
+      return response;
     }
     case "UPDATE_SETTINGS": {
       const settings = await updateSettings(message.settings);

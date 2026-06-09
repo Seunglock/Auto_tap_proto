@@ -161,6 +161,19 @@ export type DiaryEpisode = {
   updatedAt: number;
 };
 
+export type DiaryFontFamily =
+  | "system"
+  | "serif"
+  | "gothic"
+  | "handwriting"
+  | "mono";
+
+export type DiaryTextFormat = {
+  fontFamily: DiaryFontFamily;
+  fontSize: number; // px: 12–24
+  textColor: string; // hex e.g. "#3d2459"
+};
+
 export type DiaryEntry = {
   dateKey: string;
   summary: string;
@@ -168,6 +181,7 @@ export type DiaryEntry = {
   tags: string[];
   sourceEpisodeIds: string[];
   createdAt: number;
+  format?: DiaryTextFormat;
   updatedAt: number;
 };
 
