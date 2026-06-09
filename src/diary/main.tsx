@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   BackfillHistoryResponse,
@@ -13,6 +13,7 @@ import type {
   DiaryAnalysis,
   DiaryCategoryKey,
   DiaryDay,
+  DiaryEntry,
   DiaryEpisode,
   DiaryFontFamily,
   DiarySettings,
@@ -121,6 +122,7 @@ function App(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("불러오는 중");
   const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const latestDateRequest = useRef(0);
 
   useEffect(() => {
     void initialLoad();
@@ -150,6 +152,8 @@ function App(): JSX.Element {
   }
 
   async function loadDate(target: string): Promise<void> {
+    const requestId = latestDateRequest.current + 1;
+    latestDateRequest.current = requestId;
     const [dayRes, weekRes, analysisRes] = await Promise.all([
       chrome.runtime.sendMessage({
         type: "GET_DIARY_DAY",
@@ -164,6 +168,7 @@ function App(): JSX.Element {
         dateKey: target,
       }) as Promise<GetDiaryAnalysisResponse>,
     ]);
+    if (requestId !== latestDateRequest.current) return;
     setDay(dayRes.day);
     setWeek(weekRes.week);
     setAnalysis(analysisRes.analysis);
@@ -194,27 +199,50 @@ function App(): JSX.Element {
     setStatus("설정 저장 완료");
   }
 
-  async function saveDiaryEntryPatch(patch: {
-    summary?: string;
-    body?: string;
-    tags?: string[];
-    format?: DiaryTextFormat;
-  }): Promise<void> {
-    if (!day?.entry) return;
-    const res = (await chrome.runtime.sendMessage({
-      type: "SAVE_DIARY_ENTRY",
-      dateKey: day.entry.dateKey,
-      patch,
-    })) as SaveDiaryEntryResponse;
-    setDay((prev) =>
-      prev
-        ? {
-            ...prev,
-            entry: res.entry,
-          }
-        : prev,
-    );
-    setStatus("일기 편집 저장 완료");
+  async function saveDiaryEntryPatch(
+    dateKey: string,
+    patch: {
+      summary?: string;
+      body?: string;
+      tags?: string[];
+      format?: DiaryTextFormat;
+    },
+  ): Promise<DiaryEntry> {
+    try {
+      latestDateRequest.current += 1;
+      const response = (await chrome.runtime.sendMessage({
+        type: "SAVE_DIARY_ENTRY",
+        dateKey,
+        patch,
+      })) as SaveDiaryEntryResponse | { error?: string };
+      if (
+        !("type" in response) ||
+        response.type !== "SAVE_DIARY_ENTRY_RESULT" ||
+        !response.entry ||
+        response.entry.dateKey !== dateKey
+      ) {
+        throw new Error(
+          "error" in response && response.error
+            ? response.error
+            : "저장 응답을 확인할 수 없습니다.",
+        );
+      }
+      setDay((prev) =>
+        prev?.dateKey === dateKey
+          ? {
+              ...prev,
+              entry: response.entry,
+            }
+          : prev,
+      );
+      setStatus("일기 편집 저장 완료");
+      return response.entry;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "알 수 없는 오류";
+      setStatus(`일기 저장 실패: ${message}`);
+      throw error;
+    }
   }
 
   const railDates = useMemo(() => {
@@ -309,12 +337,15 @@ function EntryView(props: {
   onPrev: () => void;
   onNext: () => void;
   onGenerate: () => void;
-  onSaveEntry: (patch: {
-    summary?: string;
-    body?: string;
-    tags?: string[];
-    format?: DiaryTextFormat;
-  }) => Promise<void>;
+  onSaveEntry: (
+    dateKey: string,
+    patch: {
+      summary?: string;
+      body?: string;
+      tags?: string[];
+      format?: DiaryTextFormat;
+    },
+  ) => Promise<DiaryEntry>;
   busy: boolean;
 }): JSX.Element {
   const { day } = props;
@@ -336,6 +367,11 @@ function EntryView(props: {
     setFormatDraft(entry.format ?? DEFAULT_ENTRY_FORMAT);
   }, [entry, isEditing]);
 
+  useEffect(() => {
+    setIsEditing(false);
+    setIsSaving(false);
+  }, [day.dateKey]);
+
   function startEdit(): void {
     if (!entry) return;
     setBodyDraft(entry.body);
@@ -356,11 +392,14 @@ function EntryView(props: {
     if (!entry) return;
     setIsSaving(true);
     try {
-      await props.onSaveEntry({
+      const savedEntry = await props.onSaveEntry(entry.dateKey, {
         body: bodyDraft,
         tags: tagsDraft,
         format: formatDraft,
       });
+      setBodyDraft(savedEntry.body);
+      setTagsDraft(savedEntry.tags);
+      setFormatDraft(savedEntry.format ?? DEFAULT_ENTRY_FORMAT);
       setIsEditing(false);
     } finally {
       setIsSaving(false);
