@@ -479,9 +479,7 @@ function EntryView(props: {
           </div>
 
           <div className="face right">
-            {day.stats.totalEpisodes === 0 ? (
-              <EmptyDay />
-            ) : entry ? (
+            {entry ? (
               <>
                 <div className="r-head-row">
                   <div className="r-head">오늘의 일기</div>
@@ -546,7 +544,7 @@ function EntryView(props: {
                   </>
                 )}
               </>
-            ) : (
+            ) : day.stats.totalEpisodes > 0 ? (
               <div className="empty">
                 <div className="empty-mark">✎</div>
                 <div className="empty-title">아직 일기가 없어요.</div>
@@ -562,6 +560,8 @@ function EntryView(props: {
                   {props.busy ? "생성 중..." : "오늘의 일기 만들기"}
                 </button>
               </div>
+            ) : (
+              <EmptyDay />
             )}
           </div>
         </section>

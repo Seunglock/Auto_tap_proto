@@ -169,6 +169,7 @@ button {
     transform: translateX(-50%);
     background: linear-gradient(var(--accent-soft), rgba(176, 142, 192, 0.2));
     opacity: 0.45;
+    pointer-events: none;
 }
 
 .face {
