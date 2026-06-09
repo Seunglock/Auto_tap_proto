@@ -1,4 +1,24 @@
+import type { ConversationTurn } from "@/shared/types";
+
+export function extractGeminiTurns(): ConversationTurn[] {
+  return Array.from(
+    document.querySelectorAll(
+      "user-query, model-response, [data-test-id='conversation-turn']",
+    ),
+  )
+    .map((node) => ({
+      role: node.matches("user-query") ? ("user" as const) : ("assistant" as const),
+      text: (node as HTMLElement).innerText?.replace(/\s+/g, " ").trim() ?? "",
+    }))
+    .filter((turn) => turn.text.length >= 4)
+    .slice(-8);
+}
+
 export function extractGemini(): string {
+  const turns = extractGeminiTurns();
+  if (turns.length > 0) {
+    return turns.map((turn) => turn.text).join(" | ").slice(0, 1500);
+  }
   const selectors = [
     "user-query",
     "model-response",

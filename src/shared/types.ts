@@ -27,6 +27,29 @@ export type ExtractionSource =
   | "metadata-only"
   | "failed";
 
+export type ConversationTurn = {
+  role: "user" | "assistant";
+  text: string;
+};
+
+export type CodeBlock = {
+  language?: string;
+  code: string;
+};
+
+export type VideoContent = {
+  videoTitle: string;
+  channel?: string;
+  description?: string;
+};
+
+export type RichContent = {
+  summary?: string;
+  conversationTurns?: ConversationTurn[];
+  codeBlocks?: CodeBlock[];
+  video?: VideoContent;
+};
+
 export type ClassificationReason =
   | "initial"
   | "manual-regroup"
@@ -106,6 +129,7 @@ export type ExtractedContent = {
   pageType?: PageType;
   extractionSource?: ExtractionSource;
   extractionConfidence?: number;
+  richContent?: RichContent;
 };
 
 // ── Summary types (for popup display) ──────────────────────────────────────
@@ -150,6 +174,9 @@ export type DiaryEpisode = {
   url: string;
   domain: string;
   snippet: string;
+  richContent?: RichContent;
+  pageType?: PageType;
+  headings?: string[];
   groupKey: string | null;
   groupLabel: string;
   keywords: string[];

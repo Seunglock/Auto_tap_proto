@@ -515,6 +515,38 @@ button {
     padding: 8px 20px;
 }
 
+.topic-list {
+    display: grid;
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.topic-card {
+    margin-top: 0;
+}
+
+.topic-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 0 12px;
+    border-bottom: 1px solid var(--line);
+}
+
+.topic-label {
+    color: var(--ink);
+    font-size: 16px;
+    font-weight: 900;
+}
+
+.topic-count {
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+}
+
 .empty-card {
     padding: 26px;
     color: var(--muted);
@@ -541,6 +573,7 @@ button {
 
 .pbody {
     min-width: 0;
+    flex: 1;
 }
 
 .ptitle {
@@ -566,6 +599,77 @@ button {
 
 .pdur {
     color: var(--accent-soft);
+}
+
+.rich-preview {
+    display: grid;
+    gap: 7px;
+    margin-top: 10px;
+    max-width: 760px;
+    color: var(--ink-soft);
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.rich-summary,
+.rich-video p {
+    margin: 0;
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+}
+
+.rich-video {
+    display: grid;
+    gap: 3px;
+    border-left: 3px solid #f0a8c0;
+    padding-left: 10px;
+}
+
+.rich-video span {
+    color: var(--muted);
+}
+
+.rich-turn {
+    display: grid;
+    grid-template-columns: 30px 1fr;
+    gap: 8px;
+    border-radius: 8px;
+    background: rgba(237, 227, 245, 0.45);
+    padding: 6px 8px;
+}
+
+.rich-turn.user {
+    background: rgba(168, 200, 232, 0.24);
+}
+
+.rich-headings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.rich-headings span {
+    border-left: 2px solid var(--accent-soft);
+    padding-left: 6px;
+}
+
+.rich-code {
+    display: grid;
+    gap: 4px;
+    max-height: 130px;
+    overflow: auto;
+    margin: 0;
+    border-radius: 8px;
+    background: #2d2438;
+    color: #f4edf8;
+    padding: 9px 11px;
+    white-space: pre-wrap;
+}
+
+.rich-code small {
+    color: #c5afd5;
 }
 
 .legend {

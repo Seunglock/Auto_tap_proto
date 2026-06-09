@@ -2,6 +2,10 @@ import { extractCoreContent } from "./core-content";
 import { pickExtractor } from "./site-extractors";
 import { ContentChangeWatcher } from "./observers";
 import type { PageType, ExtractedContent } from "@/shared/types";
+import { extractChatGPTTurns } from "./site-extractors/chatgpt";
+import { extractClaudeTurns } from "./site-extractors/claude";
+import { extractGeminiTurns } from "./site-extractors/gemini";
+import { extractVideoContent } from "./site-extractors/video";
 import type {
   ExtractRequest,
   ExtractResponse,
@@ -28,6 +32,7 @@ function buildExtracted(): ExtractedContent {
     const extractor = pickExtractor();
     const snippet = safeRun(extractor);
     const pageType: PageType = aiChat ? "ai-chat" : "search";
+    const conversationTurns = aiChat ? extractConversationTurns(host) : [];
     return {
       title,
       url: location.href,
@@ -36,15 +41,27 @@ function buildExtracted(): ExtractedContent {
       pageType,
       extractionSource: "site-extractor",
       extractionConfidence: snippet.length > 100 ? 0.85 : 0.5,
+      richContent: {
+        summary: snippet.slice(0, 900),
+        conversationTurns:
+          conversationTurns.length > 0 ? conversationTurns : undefined,
+      },
     };
   }
 
   // Generic page: use core-content for structured extraction
   const core = safeRunCoreContent();
   const pageType = detectPageType(host, location.pathname);
+  const video = pageType === "video" ? extractVideoContent() : undefined;
 
   // Fall back to old extractor if core produced nothing
-  const snippet = core.text.length > 0 ? core.text : safeRun(pickExtractor());
+  const videoSnippet = video
+    ? [video.videoTitle, video.channel, video.description]
+        .filter(Boolean)
+        .join(" | ")
+    : "";
+  const snippet =
+    videoSnippet || (core.text.length > 0 ? core.text : safeRun(pickExtractor()));
 
   return {
     title,
@@ -55,7 +72,20 @@ function buildExtracted(): ExtractedContent {
     extractionSource:
       core.confidence >= 0.55 ? "core-content" : "metadata-only",
     extractionConfidence: core.confidence,
+    richContent: {
+      summary: snippet.slice(0, 900),
+      codeBlocks: core.codeBlocks.length > 0 ? core.codeBlocks : undefined,
+      video,
+    },
   };
+}
+
+function extractConversationTurns(host: string) {
+  if (host === "claude.ai" || host.endsWith(".claude.ai"))
+    return extractClaudeTurns();
+  if (host === "gemini.google.com" || host === "bard.google.com")
+    return extractGeminiTurns();
+  return extractChatGPTTurns();
 }
 
 function safeRun(fn: () => string): string {
@@ -72,7 +102,13 @@ function safeRunCoreContent(): import("./core-content").CoreContentResult {
     return extractCoreContent();
   } catch (err) {
     console.warn("[auto-tab-group] core-content extraction failed", err);
-    return { text: "", headings: [], confidence: 0, source: "fallback" };
+    return {
+      text: "",
+      headings: [],
+      codeBlocks: [],
+      confidence: 0,
+      source: "fallback",
+    };
   }
 }
 

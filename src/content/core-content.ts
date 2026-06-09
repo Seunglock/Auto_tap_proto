@@ -1,6 +1,7 @@
 export type CoreContentResult = {
   text: string;
   headings: string[];
+  codeBlocks: Array<{ language?: string; code: string }>;
   confidence: number; // 0.0–1.0
   source: "semantic-tag" | "scored-dom" | "fallback";
 };
@@ -36,6 +37,7 @@ export function extractCoreContent(): CoreContentResult {
     if (text.length >= 2 && text.length <= 200) headings.push(text);
   });
   const collectedHeadings = headings.slice(0, 5);
+  const codeBlocks = collectCodeBlocks();
 
   // Fast path — semantic tag: article → main → [role="main"]
   for (const sel of ["article", "main", '[role="main"]']) {
@@ -48,6 +50,7 @@ export function extractCoreContent(): CoreContentResult {
       return {
         text: trimToSentence(text, 800),
         headings: collectedHeadings,
+        codeBlocks,
         confidence,
         source: "semantic-tag",
       };
@@ -100,6 +103,7 @@ export function extractCoreContent(): CoreContentResult {
     return {
       text: trimToSentence(text, 800),
       headings: collectedHeadings,
+      codeBlocks,
       confidence,
       source: "scored-dom",
     };
@@ -110,7 +114,22 @@ export function extractCoreContent(): CoreContentResult {
   return {
     text: trimToSentence(fallbackText, 500),
     headings: collectedHeadings,
+    codeBlocks,
     confidence: 0.2,
     source: "fallback",
   };
+}
+
+function collectCodeBlocks(): Array<{ language?: string; code: string }> {
+  const blocks: Array<{ language?: string; code: string }> = [];
+  const seen = new Set<string>();
+  document.querySelectorAll("pre code, pre").forEach((node) => {
+    const code = node.textContent?.trim() ?? "";
+    if (code.length < 8 || seen.has(code)) return;
+    seen.add(code);
+    const classes = `${node.className} ${node.parentElement?.className ?? ""}`;
+    const language = classes.match(/(?:language-|lang-)([\w#+.-]+)/i)?.[1];
+    blocks.push({ language, code: code.slice(0, 2000) });
+  });
+  return blocks.slice(0, 5);
 }

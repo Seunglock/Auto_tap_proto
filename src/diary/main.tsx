@@ -920,10 +920,29 @@ function EpisodeList(props: { episodes: DiaryEpisode[] }): JSX.Element {
     return <div className="dcard empty-card">이 날짜에는 기록이 없습니다.</div>;
   }
 
+  const topicGroups = groupEpisodesByRelatedTags(props.episodes);
+
   return (
-    <section className="dcard episode-card">
-      {props.episodes.map((episode) => (
-        <article key={episode.id} className="pitem">
+    <section className="topic-list">
+      {topicGroups.map((group) => (
+        <section key={group.id} className="dcard episode-card topic-card">
+          <header className="topic-head">
+            <div>
+              <div className="topic-label">{group.label}</div>
+              <div className="topic-count">
+                {group.episodes.length} related items
+              </div>
+            </div>
+            <div className="pmeta">
+              {group.tags.slice(0, 5).map((tag) => (
+                <span key={tag} className="pdur">
+                  #{tag}
+                </span>
+              ))}
+            </div>
+          </header>
+          {group.episodes.map((episode) => (
+            <article key={episode.id} className="pitem">
           <div className="ptime">{timeLabel(episode.startedAt)}</div>
           <div className="pbody">
             <div className="ptitle">{episode.title || episode.domain}</div>
@@ -943,11 +962,126 @@ function EpisodeList(props: { episodes: DiaryEpisode[] }): JSX.Element {
                 </span>
               ))}
             </div>
+            <RichContentPreview episode={episode} />
           </div>
         </article>
+          ))}
+        </section>
       ))}
     </section>
   );
+}
+
+function RichContentPreview(props: {
+  episode: DiaryEpisode;
+}): JSX.Element | null {
+  const { episode } = props;
+  if (episode.isSensitive) return null;
+  const rich = episode.richContent;
+  if (!rich && !episode.headings?.length && !episode.snippet) return null;
+
+  return (
+    <div className="rich-preview">
+      {rich?.video && (
+        <div className="rich-video">
+          <b>{rich.video.videoTitle}</b>
+          {rich.video.channel && <span>{rich.video.channel}</span>}
+          {rich.video.description && <p>{rich.video.description}</p>}
+        </div>
+      )}
+      {rich?.conversationTurns?.slice(-3).map((turn, index) => (
+        <div key={`${turn.role}-${index}`} className={`rich-turn ${turn.role}`}>
+          <b>{turn.role === "user" ? "You" : "AI"}</b>
+          <span>{turn.text}</span>
+        </div>
+      ))}
+      {episode.headings && episode.headings.length > 0 && (
+        <div className="rich-headings">
+          {episode.headings.slice(0, 3).map((heading) => (
+            <span key={heading}>{heading}</span>
+          ))}
+        </div>
+      )}
+      {rich?.codeBlocks?.slice(0, 1).map((block, index) => (
+        <pre key={index} className="rich-code">
+          {block.language && <small>{block.language}</small>}
+          <code>{block.code}</code>
+        </pre>
+      ))}
+      {!rich?.video && !rich?.conversationTurns?.length && (
+        <p className="rich-summary">{rich?.summary ?? episode.snippet}</p>
+      )}
+    </div>
+  );
+}
+
+type EpisodeTopicGroup = {
+  id: string;
+  label: string;
+  tags: string[];
+  episodes: DiaryEpisode[];
+};
+
+function groupEpisodesByRelatedTags(
+  episodes: DiaryEpisode[],
+): EpisodeTopicGroup[] {
+  const groups: EpisodeTopicGroup[] = [];
+  for (const episode of episodes) {
+    const tags = new Set(
+      [...episode.keywords, ...episode.tokens].map(normalizeTag),
+    );
+    const match = groups.find((group) => {
+      if (
+        episode.groupKey &&
+        group.episodes.some((item) => item.groupKey === episode.groupKey)
+      )
+        return true;
+      const shared = group.tags.filter((tag) =>
+        [...tags].some((candidate) => areTagsSimilar(tag, candidate)),
+      );
+      return shared.length >= 2 || (shared.length >= 1 && tags.size <= 3);
+    });
+    if (match) {
+      match.episodes.push(episode);
+      match.tags = topEpisodeTags(match.episodes);
+      continue;
+    }
+    groups.push({
+      id: episode.groupKey ? `group:${episode.groupKey}` : `episode:${episode.id}`,
+      label: episode.groupLabel || episode.keywords[0] || episode.domain,
+      tags: topEpisodeTags([episode]),
+      episodes: [episode],
+    });
+  }
+  return groups.sort(
+    (a, b) =>
+      b.episodes.length - a.episodes.length ||
+      a.episodes[0].startedAt - b.episodes[0].startedAt,
+  );
+}
+
+function topEpisodeTags(episodes: DiaryEpisode[]): string[] {
+  const counts = new Map<string, number>();
+  for (const tag of episodes.flatMap((episode) => episode.keywords)) {
+    const normalized = normalizeTag(tag);
+    if (normalized) counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([tag]) => tag);
+}
+
+function normalizeTag(tag: string): string {
+  return tag.toLowerCase().replace(/^#/, "").trim();
+}
+
+function areTagsSimilar(left: string, right: string): boolean {
+  const a = normalizeTag(left);
+  const b = normalizeTag(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a));
 }
 
 function countCategories(
