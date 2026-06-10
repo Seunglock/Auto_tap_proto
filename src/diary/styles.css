@@ -1031,6 +1031,8 @@ button {
 .r-editor {
     width: 100%;
     min-height: 260px;
+    max-height: 520px;
+    overflow-y: auto;
     resize: vertical;
     border: 1px solid var(--line);
     border-radius: 12px;
@@ -1039,6 +1041,7 @@ button {
     padding: 14px 16px;
     margin-bottom: 10px;
     outline: none;
+    white-space: pre-wrap;
 }
 
 .tag-editor {

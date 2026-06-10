@@ -215,6 +215,7 @@ export type DiaryEntry = {
   dateKey: string;
   summary: string;
   body: string;
+  bodyHtml?: string;
   tags: string[];
   sourceEpisodeIds: string[];
   createdAt: number;

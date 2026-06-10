@@ -141,6 +141,7 @@ export type SaveDiaryEntryRequest = {
   patch: {
     summary?: string;
     body?: string;
+    bodyHtml?: string;
     tags?: string[];
     format?: DiaryTextFormat;
   };

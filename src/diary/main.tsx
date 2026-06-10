@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import type { CSSProperties } from "react";
 import type {
   BackfillHistoryResponse,
   GenerateDiaryEntryResponse,
@@ -204,6 +205,7 @@ function App(): JSX.Element {
     patch: {
       summary?: string;
       body?: string;
+      bodyHtml?: string;
       tags?: string[];
       format?: DiaryTextFormat;
     },
@@ -342,6 +344,7 @@ function EntryView(props: {
     patch: {
       summary?: string;
       body?: string;
+      bodyHtml?: string;
       tags?: string[];
       format?: DiaryTextFormat;
     },
@@ -356,13 +359,16 @@ function EntryView(props: {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [bodyDraft, setBodyDraft] = useState("");
+  const [bodyHtmlDraft, setBodyHtmlDraft] = useState("");
   const [tagsDraft, setTagsDraft] = useState<string[]>([]);
   const [formatDraft, setFormatDraft] =
     useState<DiaryTextFormat>(DEFAULT_ENTRY_FORMAT);
+  const selectedBodyRange = useRef<Range | null>(null);
 
   useEffect(() => {
     if (!entry || isEditing) return;
     setBodyDraft(entry.body);
+    setBodyHtmlDraft(entry.bodyHtml ?? plainTextToHtml(entry.body));
     setTagsDraft(entry.tags);
     setFormatDraft(entry.format ?? DEFAULT_ENTRY_FORMAT);
   }, [entry, isEditing]);
@@ -375,6 +381,7 @@ function EntryView(props: {
   function startEdit(): void {
     if (!entry) return;
     setBodyDraft(entry.body);
+    setBodyHtmlDraft(entry.bodyHtml ?? plainTextToHtml(entry.body));
     setTagsDraft(entry.tags);
     setFormatDraft(entry.format ?? DEFAULT_ENTRY_FORMAT);
     setIsEditing(true);
@@ -384,6 +391,7 @@ function EntryView(props: {
     setIsEditing(false);
     if (!entry) return;
     setBodyDraft(entry.body);
+    setBodyHtmlDraft(entry.bodyHtml ?? plainTextToHtml(entry.body));
     setTagsDraft(entry.tags);
     setFormatDraft(entry.format ?? DEFAULT_ENTRY_FORMAT);
   }
@@ -394,10 +402,12 @@ function EntryView(props: {
     try {
       const savedEntry = await props.onSaveEntry(entry.dateKey, {
         body: bodyDraft,
+        bodyHtml: sanitizeBodyHtml(bodyHtmlDraft),
         tags: tagsDraft,
         format: formatDraft,
       });
       setBodyDraft(savedEntry.body);
+      setBodyHtmlDraft(savedEntry.bodyHtml ?? plainTextToHtml(savedEntry.body));
       setTagsDraft(savedEntry.tags);
       setFormatDraft(savedEntry.format ?? DEFAULT_ENTRY_FORMAT);
       setIsEditing(false);
@@ -500,11 +510,24 @@ function EntryView(props: {
                     <FormatToolbar
                       value={formatDraft}
                       onChange={setFormatDraft}
+                      onApplyTextColor={(color) => {
+                        const selection = window.getSelection();
+                        if (!selection || !selectedBodyRange.current) return;
+                        selection.removeAllRanges();
+                        selection.addRange(selectedBodyRange.current);
+                        document.execCommand("styleWithCSS", false, "true");
+                        document.execCommand("foreColor", false, color);
+                      }}
                     />
-                    <textarea
-                      className="r-editor"
-                      value={bodyDraft}
-                      onChange={(e) => setBodyDraft(e.target.value)}
+                    <RichBodyEditor
+                      html={bodyHtmlDraft}
+                      onChange={(next) => {
+                        setBodyDraft(next.text);
+                        setBodyHtmlDraft(next.html);
+                      }}
+                      onSelectionChange={(range) => {
+                        selectedBodyRange.current = range;
+                      }}
                       style={{
                         fontFamily: FONT_STYLE_MAP[formatDraft.fontFamily],
                         fontSize: `${formatDraft.fontSize}px`,
@@ -531,14 +554,17 @@ function EntryView(props: {
                   <>
                     <div
                       className="r-body"
+                      dangerouslySetInnerHTML={{
+                        __html: sanitizeBodyHtml(
+                          entry.bodyHtml ?? plainTextToHtml(entry.body),
+                        ),
+                      }}
                       style={{
                         fontFamily: FONT_STYLE_MAP[entryFormat.fontFamily],
                         fontSize: `${entryFormat.fontSize}px`,
                         color: entryFormat.textColor,
                       }}
-                    >
-                      {entry.body}
-                    </div>
+                    />
                     <div className="tags">
                       {entry.tags.map((tag) => (
                         <span key={tag} className="tag">
@@ -581,9 +607,69 @@ function EntryView(props: {
   );
 }
 
+function RichBodyEditor(props: {
+  html: string;
+  onChange: (next: { html: string; text: string }) => void;
+  onSelectionChange: (range: Range) => void;
+  style: CSSProperties;
+}): JSX.Element {
+  const editorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || document.activeElement === editor) return;
+    editor.innerHTML = sanitizeBodyHtml(props.html);
+  }, [props.html]);
+
+  function emitChange(): void {
+    const editor = editorRef.current;
+    if (!editor) return;
+    props.onChange({
+      html: editor.innerHTML,
+      text: editor.innerText.replace(/\n+$/, ""),
+    });
+  }
+
+  function rememberSelection(): void {
+    const editor = editorRef.current;
+    const selection = window.getSelection();
+    if (!editor || !selection || selection.rangeCount === 0) return;
+    const range = selection.getRangeAt(0);
+    if (editor.contains(range.commonAncestorContainer)) {
+      props.onSelectionChange(range.cloneRange());
+    }
+  }
+
+  return (
+    <div
+      ref={editorRef}
+      className="r-editor"
+      contentEditable
+      suppressContentEditableWarning
+      role="textbox"
+      aria-multiline="true"
+      aria-label="일기 본문"
+      style={props.style}
+      onInput={emitChange}
+      onMouseUp={rememberSelection}
+      onKeyUp={rememberSelection}
+      onBlur={rememberSelection}
+      onPaste={(event) => {
+        event.preventDefault();
+        document.execCommand(
+          "insertText",
+          false,
+          event.clipboardData.getData("text/plain"),
+        );
+      }}
+    />
+  );
+}
+
 function FormatToolbar(props: {
   value: DiaryTextFormat;
   onChange: (next: DiaryTextFormat) => void;
+  onApplyTextColor: (color: string) => void;
 }): JSX.Element {
   return (
     <div className="fmt-toolbar">
@@ -623,9 +709,10 @@ function FormatToolbar(props: {
           <button
             key={color}
             type="button"
-            className={`fmt-color ${props.value.textColor === color ? "active" : ""}`}
+            className="fmt-color"
             style={{ background: color }}
-            onClick={() => props.onChange({ ...props.value, textColor: color })}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => props.onApplyTextColor(color)}
             aria-label={`색상 ${color}`}
             title={color}
           />
@@ -635,13 +722,64 @@ function FormatToolbar(props: {
           <input
             type="color"
             value={props.value.textColor}
-            onChange={(e) =>
-              props.onChange({ ...props.value, textColor: e.target.value })
-            }
+            onChange={(e) => props.onApplyTextColor(e.target.value)}
           />
         </label>
       </div>
     </div>
+  );
+}
+
+function plainTextToHtml(text: string): string {
+  return escapeHtml(text).replace(/\r?\n/g, "<br>");
+}
+
+function sanitizeBodyHtml(html: string): string {
+  const documentFragment = new DOMParser().parseFromString(html, "text/html");
+
+  function sanitizeNode(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeHtml(node.textContent ?? "");
+    }
+    if (!(node instanceof HTMLElement)) return "";
+
+    const children = [...node.childNodes].map(sanitizeNode).join("");
+    const tag = node.tagName.toLowerCase();
+    if (tag === "br") return "<br>";
+    if (tag === "span") {
+      const color = node.style.color;
+      return isSafeTextColor(color)
+        ? `<span style="color: ${escapeHtml(color)}">${children}</span>`
+        : children;
+    }
+    if (tag === "div" || tag === "p") return `${children}<br>`;
+    return children;
+  }
+
+  return [...documentFragment.body.childNodes]
+    .map(sanitizeNode)
+    .join("")
+    .replace(/(?:<br>)+$/, "");
+}
+
+function isSafeTextColor(color: string): boolean {
+  return (
+    /^#[0-9a-f]{3,8}$/i.test(color) ||
+    /^rgba?\([\d\s,.%]+\)$/i.test(color)
+  );
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;",
+      })[character] ?? character,
   );
 }
 

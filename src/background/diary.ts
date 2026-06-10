@@ -797,6 +797,7 @@ export async function saveDiaryEntry(
   patch: {
     summary?: string;
     body?: string;
+    bodyHtml?: string;
     tags?: string[];
     format?: import("@/shared/types").DiaryTextFormat;
   },
@@ -810,6 +811,7 @@ export async function saveDiaryEntry(
     ...existing,
     ...(patch.summary !== undefined && { summary: patch.summary }),
     ...(patch.body !== undefined && { body: patch.body }),
+    ...(patch.bodyHtml !== undefined && { bodyHtml: patch.bodyHtml }),
     ...(patch.tags !== undefined && { tags: patch.tags }),
     ...(patch.format !== undefined && { format: patch.format }),
     updatedAt: Date.now(),
