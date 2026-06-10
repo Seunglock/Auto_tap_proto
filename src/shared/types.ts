@@ -48,10 +48,18 @@ export type ContentSection = {
   text: string;
 };
 
+export type ContentFact = {
+  subject: string;
+  detail: string;
+  kind: "place" | "product" | "event" | "organization" | "fact";
+  source: "structured-data" | "content-card" | "section" | "sentence";
+};
+
 export type RichContent = {
   summary?: string;
   bodyText?: string;
   sections?: ContentSection[];
+  facts?: ContentFact[];
   conversationTurns?: ConversationTurn[];
   codeBlocks?: CodeBlock[];
   video?: VideoContent;
@@ -211,6 +219,13 @@ export type DiaryTextFormat = {
   textColor: string; // hex e.g. "#3d2459"
 };
 
+export type DiaryTagNote = {
+  body: string;
+  bodyHtml?: string;
+  format?: DiaryTextFormat;
+  updatedAt: number;
+};
+
 export type DiaryEntry = {
   dateKey: string;
   summary: string;
@@ -220,6 +235,7 @@ export type DiaryEntry = {
   sourceEpisodeIds: string[];
   createdAt: number;
   format?: DiaryTextFormat;
+  tagNotes?: Record<string, DiaryTagNote>;
   updatedAt: number;
 };
 

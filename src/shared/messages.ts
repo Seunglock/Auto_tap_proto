@@ -4,6 +4,7 @@ import type {
   DiaryDay,
   DiaryEntry,
   DiarySettings,
+  DiaryTagNote,
   DiaryTextFormat,
   DiaryWeek,
   ExtractedContent,
@@ -144,6 +145,7 @@ export type SaveDiaryEntryRequest = {
     bodyHtml?: string;
     tags?: string[];
     format?: DiaryTextFormat;
+    tagNotes?: Record<string, DiaryTagNote>;
   };
 };
 

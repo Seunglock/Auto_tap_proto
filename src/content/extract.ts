@@ -6,6 +6,11 @@ import { extractChatGPTTurns } from "./site-extractors/chatgpt";
 import { extractClaudeTurns } from "./site-extractors/claude";
 import { extractGeminiTurns } from "./site-extractors/gemini";
 import { extractVideoContent } from "./site-extractors/video";
+import {
+  extractFactualContent,
+  extractFactsFromText,
+  summarizeFacts,
+} from "./factual-content";
 import type {
   ExtractRequest,
   ExtractResponse,
@@ -37,17 +42,21 @@ function buildExtracted(): ExtractedContent {
       conversationTurns.length > 0
         ? formatConversationBody(conversationTurns)
         : snippet.slice(0, 16_000);
+    const facts = extractFactsFromText(bodyText, title).slice(0, 20);
+    const factSummary = summarizeFacts(facts);
+    const factualSnippet = joinDistinct([factSummary, snippet]).slice(0, 2_400);
     return {
       title,
       url: location.href,
-      contentSnippet: snippet,
+      contentSnippet: factualSnippet,
       headings: [],
       pageType,
       extractionSource: "site-extractor",
       extractionConfidence: snippet.length > 100 ? 0.85 : 0.5,
       richContent: {
-        summary: snippet.slice(0, 1_800),
+        summary: (factSummary || snippet).slice(0, 1_800),
         bodyText,
+        facts: facts.length > 0 ? facts : undefined,
         conversationTurns:
           conversationTurns.length > 0 ? conversationTurns : undefined,
       },
@@ -59,13 +68,16 @@ function buildExtracted(): ExtractedContent {
   const pageType = detectPageType(host, location.pathname);
   const video = pageType === "video" ? extractVideoContent() : undefined;
   const description = extractMetaDescription();
+  const facts = extractFactualContent(core, title);
+  const factSummary = summarizeFacts(facts);
 
   const videoSnippet = video
     ? [video.videoTitle, video.channel, video.description]
         .filter(Boolean)
         .join(" | ")
     : "";
-  const snippet = videoSnippet || joinDistinct([description, core.text]);
+  const snippet =
+    videoSnippet || joinDistinct([factSummary, description, core.text]);
   const fallbackSnippet = snippet || safeRun(pickExtractor());
   const bodyText =
     pageType === "video"
@@ -82,9 +94,10 @@ function buildExtracted(): ExtractedContent {
       core.confidence >= 0.55 ? "core-content" : "metadata-only",
     extractionConfidence: core.confidence,
     richContent: {
-      summary: fallbackSnippet.slice(0, 1_800),
+      summary: (factSummary || fallbackSnippet).slice(0, 1_800),
       bodyText: bodyText.slice(0, 16_000),
       sections: core.sections.length > 0 ? core.sections : undefined,
+      facts: facts.length > 0 ? facts : undefined,
       codeBlocks: core.codeBlocks.length > 0 ? core.codeBlocks : undefined,
       video,
     },

@@ -366,6 +366,7 @@ export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
     tags: fallback.tags,
     sourceEpisodeIds: safeEpisodes.map((episode) => episode.id),
     createdAt: day.entry?.createdAt ?? now,
+    tagNotes: day.entry?.tagNotes,
     updatedAt: now,
   };
   const entries = await getAllDiaryEntries();
@@ -588,17 +589,29 @@ function buildRuleBasedEntry(
 ): Pick<DiaryEntry, "summary" | "body" | "tags"> {
   const topGroups = day.topGroups.slice(0, 3);
   const topKeywords = day.topKeywords.slice(0, 5);
+  const concreteFacts = collectConcreteFacts(day).slice(0, 6);
   const main = topGroups[0]?.label ?? topKeywords[0] ?? "디지털 기록";
   const secondary = topGroups[1]?.label;
-  const summary = secondary
-    ? `"${main}에서 시작해,\n${secondary}까지 이어진 하루."`
-    : `"${main} 쪽으로\n조용히 기울어진 하루."`;
+  const summary =
+    concreteFacts.length > 0
+      ? `"${concreteFacts[0].subject}"에 관한 구체적인 정보를 확인한 날.`
+      : secondary
+        ? `"${main}에서 시작해,\n${secondary}까지 이어진 하루."`
+        : `"${main} 쪽으로\n조용히 기울어진 하루."`;
   const domains = day.topDomains
     .slice(0, 3)
     .map((d) => d.domain)
     .join(", ");
   const bodyParts = [
     `${formatKoreanDate(day.dateKey)}에는 ${main} 관련 기록이 가장 많이 남았어요.`,
+    concreteFacts.length > 0
+      ? [
+          "오늘 확인한 구체적 내용:",
+          ...concreteFacts.map(
+            (fact) => `- ${fact.subject}: ${fact.detail.slice(0, 240)}`,
+          ),
+        ].join("\n")
+      : "",
     secondary
       ? `중간중간 ${secondary} 흐름도 이어져서, 관심사가 한 방향에만 머물지는 않았습니다.`
       : "크게 흩어지기보다 비슷한 주제 안에서 탐색이 이어졌습니다.",
@@ -614,6 +627,25 @@ function buildRuleBasedEntry(
     body: bodyParts.join("\n\n"),
     tags: topKeywords.slice(0, 4),
   };
+}
+
+function collectConcreteFacts(
+  day: DiaryDay,
+): Array<{ subject: string; detail: string }> {
+  const seen = new Set<string>();
+  const facts: Array<{ subject: string; detail: string }> = [];
+  for (const episode of day.episodes) {
+    if (episode.isSensitive) continue;
+    for (const fact of episode.richContent?.facts ?? []) {
+      const key = `${fact.subject.toLowerCase()}|${fact.detail
+        .toLowerCase()
+        .slice(0, 160)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push({ subject: fact.subject, detail: fact.detail });
+    }
+  }
+  return facts;
 }
 
 async function generateWithGemini(
@@ -637,6 +669,7 @@ async function generateWithGemini(
       summary: episode.richContent?.summary ?? episode.snippet,
       bodyText: episode.richContent?.bodyText?.slice(0, 4_000),
       sections: episode.richContent?.sections?.slice(0, 4),
+      facts: episode.richContent?.facts?.slice(0, 12),
       headings: episode.headings?.slice(0, 3),
       video: episode.richContent?.video,
       conversationTurns: episode.richContent?.conversationTurns?.slice(-3),
@@ -800,6 +833,7 @@ export async function saveDiaryEntry(
     bodyHtml?: string;
     tags?: string[];
     format?: import("@/shared/types").DiaryTextFormat;
+    tagNotes?: Record<string, import("@/shared/types").DiaryTagNote>;
   },
 ): Promise<DiaryEntry> {
   const entries = await getAllDiaryEntries();
@@ -814,6 +848,7 @@ export async function saveDiaryEntry(
     ...(patch.bodyHtml !== undefined && { bodyHtml: patch.bodyHtml }),
     ...(patch.tags !== undefined && { tags: patch.tags }),
     ...(patch.format !== undefined && { format: patch.format }),
+    ...(patch.tagNotes !== undefined && { tagNotes: patch.tagNotes }),
     updatedAt: Date.now(),
   };
   entries[dateKey] = updated;

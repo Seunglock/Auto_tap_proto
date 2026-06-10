@@ -18,6 +18,7 @@ import type {
   DiaryEpisode,
   DiaryFontFamily,
   DiarySettings,
+  DiaryTagNote,
   DiaryTextFormat,
   DiaryWeek,
 } from "@/shared/types";
@@ -26,6 +27,15 @@ import rabbitUrl from "./assets/rabbit.png";
 import timelinePathUrl from "./assets/timeline-path.png";
 
 type ViewKey = "entry" | "timeline" | "board" | "analysis";
+
+type DiaryEntryPatch = {
+  summary?: string;
+  body?: string;
+  bodyHtml?: string;
+  tags?: string[];
+  format?: DiaryTextFormat;
+  tagNotes?: Record<string, DiaryTagNote>;
+};
 
 const CATEGORY_LABELS: Record<DiaryCategoryKey, string> = {
   dev: "AI · 개발",
@@ -56,6 +66,14 @@ const FONT_STYLE_MAP: Record<DiaryFontFamily, string> = {
   gothic: '"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif',
   handwriting: '"Segoe Print", "Nanum Pen Script", cursive',
   mono: '"JetBrains Mono", "Consolas", monospace',
+};
+
+const FONT_COMMAND_MAP: Record<DiaryFontFamily, string> = {
+  system: "Segoe UI",
+  serif: "Georgia",
+  gothic: "Malgun Gothic",
+  handwriting: "Segoe Print",
+  mono: "Consolas",
 };
 
 const COLOR_PRESETS = [
@@ -202,13 +220,7 @@ function App(): JSX.Element {
 
   async function saveDiaryEntryPatch(
     dateKey: string,
-    patch: {
-      summary?: string;
-      body?: string;
-      bodyHtml?: string;
-      tags?: string[];
-      format?: DiaryTextFormat;
-    },
+    patch: DiaryEntryPatch,
   ): Promise<DiaryEntry> {
     try {
       latestDateRequest.current += 1;
@@ -341,13 +353,7 @@ function EntryView(props: {
   onGenerate: () => void;
   onSaveEntry: (
     dateKey: string,
-    patch: {
-      summary?: string;
-      body?: string;
-      bodyHtml?: string;
-      tags?: string[];
-      format?: DiaryTextFormat;
-    },
+    patch: DiaryEntryPatch,
   ) => Promise<DiaryEntry>;
   busy: boolean;
 }): JSX.Element {
@@ -429,7 +435,8 @@ function EntryView(props: {
         <button className="arrow" onClick={props.onPrev} aria-label="이전 날">
           ‹
         </button>
-        <section className="book">
+        <div className="entry-content-grid">
+          <section className="book">
           <div className="face left">
             <div className="l-datebig">{shortDate(day.dateKey)}</div>
             <div className="l-dow">{dayName(day.dateKey)}</div>
@@ -509,14 +516,25 @@ function EntryView(props: {
                   <>
                     <FormatToolbar
                       value={formatDraft}
-                      onChange={setFormatDraft}
+                      onApplyFontFamily={(fontFamily) => {
+                        applySelectionFormat(
+                          selectedBodyRange.current,
+                          "fontName",
+                          FONT_COMMAND_MAP[fontFamily],
+                        );
+                      }}
+                      onApplyFontSize={(fontSize) => {
+                        applySelectionFontSize(
+                          selectedBodyRange.current,
+                          fontSize,
+                        );
+                      }}
                       onApplyTextColor={(color) => {
-                        const selection = window.getSelection();
-                        if (!selection || !selectedBodyRange.current) return;
-                        selection.removeAllRanges();
-                        selection.addRange(selectedBodyRange.current);
-                        document.execCommand("styleWithCSS", false, "true");
-                        document.execCommand("foreColor", false, color);
+                        applySelectionFormat(
+                          selectedBodyRange.current,
+                          "foreColor",
+                          color,
+                        );
                       }}
                     />
                     <RichBodyEditor
@@ -595,7 +613,13 @@ function EntryView(props: {
               <EmptyDay />
             )}
           </div>
-        </section>
+          </section>
+          <TagWorkspace
+            day={day}
+            entry={entry}
+            onSaveEntry={props.onSaveEntry}
+          />
+        </div>
         <button className="arrow" onClick={props.onNext} aria-label="다음 날">
           ›
         </button>
@@ -605,6 +629,260 @@ function EntryView(props: {
       </div>
     </main>
   );
+}
+
+function TagWorkspace(props: {
+  day: DiaryDay;
+  entry: DiaryEntry | null;
+  onSaveEntry: (dateKey: string, patch: DiaryEntryPatch) => Promise<DiaryEntry>;
+}): JSX.Element {
+  const tags = useMemo(
+    () =>
+      [
+        ...new Set([
+          ...(props.entry?.tags ?? []),
+          ...props.day.topKeywords,
+          ...props.day.episodes.flatMap((episode) => episode.keywords),
+        ]),
+      ].slice(0, 14),
+    [props.day, props.entry],
+  );
+  const [selectedTag, setSelectedTag] = useState(tags[0] ?? "");
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [bodyDraft, setBodyDraft] = useState("");
+  const [bodyHtmlDraft, setBodyHtmlDraft] = useState("");
+  const [formatDraft, setFormatDraft] =
+    useState<DiaryTextFormat>(DEFAULT_ENTRY_FORMAT);
+  const selectedRange = useRef<Range | null>(null);
+
+  const relatedEpisodes = useMemo(
+    () =>
+      props.day.episodes.filter(
+        (episode) =>
+          !episode.isSensitive && episodeMatchesTag(episode, selectedTag),
+      ),
+    [props.day.episodes, selectedTag],
+  );
+  const generatedBody = useMemo(
+    () => buildTagViewBody(selectedTag, relatedEpisodes),
+    [relatedEpisodes, selectedTag],
+  );
+  const savedNote = selectedTag
+    ? props.entry?.tagNotes?.[selectedTag]
+    : undefined;
+  const visibleBody = savedNote?.body ?? generatedBody;
+  const visibleHtml =
+    savedNote?.bodyHtml ?? plainTextToHtml(savedNote?.body ?? generatedBody);
+  const visibleFormat = savedNote?.format ?? DEFAULT_ENTRY_FORMAT;
+
+  useEffect(() => {
+    if (!tags.includes(selectedTag)) setSelectedTag(tags[0] ?? "");
+  }, [selectedTag, tags]);
+
+  useEffect(() => {
+    setIsEditing(false);
+    setBodyDraft(visibleBody);
+    setBodyHtmlDraft(visibleHtml);
+    setFormatDraft(visibleFormat);
+  }, [props.day.dateKey, selectedTag, savedNote?.updatedAt]);
+
+  function startEdit(): void {
+    if (!props.entry || !selectedTag) return;
+    setBodyDraft(visibleBody);
+    setBodyHtmlDraft(visibleHtml);
+    setFormatDraft(visibleFormat);
+    setIsEditing(true);
+  }
+
+  function cancelEdit(): void {
+    setIsEditing(false);
+    setBodyDraft(visibleBody);
+    setBodyHtmlDraft(visibleHtml);
+    setFormatDraft(visibleFormat);
+  }
+
+  async function saveEdit(): Promise<void> {
+    if (!props.entry || !selectedTag) return;
+    setIsSaving(true);
+    try {
+      const note: DiaryTagNote = {
+        body: bodyDraft,
+        bodyHtml: sanitizeBodyHtml(bodyHtmlDraft),
+        format: formatDraft,
+        updatedAt: Date.now(),
+      };
+      await props.onSaveEntry(props.entry.dateKey, {
+        tagNotes: {
+          ...(props.entry.tagNotes ?? {}),
+          [selectedTag]: note,
+        },
+      });
+      setIsEditing(false);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <aside className="tag-workspace">
+      <div className="tag-postits" aria-label="태그 포스트잇">
+        {tags.length > 0 ? (
+          tags.map((tag, index) => (
+            <button
+              key={tag}
+              type="button"
+              className={`tag-postit ${selectedTag === tag ? "on" : ""}`}
+              style={
+                {
+                  "--postit-tilt": `${(index % 3) * 1.5 - 1.5}deg`,
+                } as CSSProperties
+              }
+              onClick={() => setSelectedTag(tag)}
+            >
+              #{tag}
+            </button>
+          ))
+        ) : (
+          <span className="tag-postit-empty">수집된 태그가 없습니다.</span>
+        )}
+      </div>
+
+      <section className="tag-view-page">
+        <div className="tag-page-head">
+          <div>
+            <span className="tag-page-kicker">TAG VIEW</span>
+            <h2>{selectedTag ? `#${selectedTag}` : "태그를 선택하세요"}</h2>
+            <p>{relatedEpisodes.length}개의 관련 수집 내용</p>
+          </div>
+          {props.entry && selectedTag && !isEditing && (
+            <button type="button" className="btn-edit" onClick={startEdit}>
+              내용 편집
+            </button>
+          )}
+        </div>
+
+        {selectedTag &&
+          (isEditing ? (
+            <>
+              <FormatToolbar
+                value={formatDraft}
+                onApplyFontFamily={(fontFamily) => {
+                  applySelectionFormat(
+                    selectedRange.current,
+                    "fontName",
+                    FONT_COMMAND_MAP[fontFamily],
+                  );
+                }}
+                onApplyFontSize={(fontSize) => {
+                  applySelectionFontSize(selectedRange.current, fontSize);
+                }}
+                onApplyTextColor={(color) => {
+                  applySelectionFormat(
+                    selectedRange.current,
+                    "foreColor",
+                    color,
+                  );
+                }}
+              />
+              <RichBodyEditor
+                html={bodyHtmlDraft}
+                onChange={(next) => {
+                  setBodyDraft(next.text);
+                  setBodyHtmlDraft(next.html);
+                }}
+                onSelectionChange={(range) => {
+                  selectedRange.current = range;
+                }}
+                style={{
+                  fontFamily: FONT_STYLE_MAP[formatDraft.fontFamily],
+                  fontSize: `${formatDraft.fontSize}px`,
+                  color: formatDraft.textColor,
+                }}
+              />
+              <div className="edit-actions">
+                <button className="btn-cancel" onClick={cancelEdit}>
+                  취소
+                </button>
+                <button
+                  className="btn-save"
+                  onClick={() => void saveEdit()}
+                  disabled={isSaving}
+                >
+                  {isSaving ? "저장 중..." : "저장"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div
+                className="tag-note-body"
+                dangerouslySetInnerHTML={{
+                  __html: sanitizeBodyHtml(visibleHtml),
+                }}
+                style={{
+                  fontFamily: FONT_STYLE_MAP[visibleFormat.fontFamily],
+                  fontSize: `${visibleFormat.fontSize}px`,
+                  color: visibleFormat.textColor,
+                }}
+              />
+              <div className="tag-source-list">
+                {relatedEpisodes.slice(0, 8).map((episode) => (
+                  <span key={episode.id} title={episode.title}>
+                    {episode.domain || episode.title}
+                  </span>
+                ))}
+              </div>
+              {!props.entry && (
+                <p className="tag-edit-hint">
+                  오늘의 일기를 만든 뒤 이 페이지도 편집해 저장할 수 있습니다.
+                </p>
+              )}
+            </>
+          ))}
+      </section>
+    </aside>
+  );
+}
+
+function episodeMatchesTag(episode: DiaryEpisode, tag: string): boolean {
+  const needle = normalizeTag(tag);
+  if (!needle) return false;
+  const values = [
+    ...episode.keywords,
+    ...episode.tokens,
+    episode.groupLabel,
+    episode.title,
+    ...(episode.richContent?.facts ?? []).flatMap((fact) => [
+      fact.subject,
+      fact.detail,
+    ]),
+  ];
+  return values.some((value) => normalizeTag(value).includes(needle));
+}
+
+function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
+  if (!tag) return "";
+  if (episodes.length === 0)
+    return `#${tag}와 직접 연결된 수집 내용을 아직 찾지 못했습니다.`;
+
+  const lines = [`#${tag} 관련 수집 내용`];
+  const seenFacts = new Set<string>();
+  for (const episode of episodes.slice(0, 10)) {
+    const facts = episode.richContent?.facts ?? [];
+    if (facts.length > 0) {
+      for (const fact of facts.slice(0, 5)) {
+        const key = `${fact.subject}|${fact.detail.slice(0, 120)}`;
+        if (seenFacts.has(key)) continue;
+        seenFacts.add(key);
+        lines.push(`• ${fact.subject}: ${fact.detail}`);
+      }
+      continue;
+    }
+    const summary = episode.richContent?.summary ?? episode.snippet;
+    if (summary) lines.push(`• ${episode.title || episode.domain}: ${summary}`);
+  }
+  return lines.join("\n\n");
 }
 
 function RichBodyEditor(props: {
@@ -668,19 +946,17 @@ function RichBodyEditor(props: {
 
 function FormatToolbar(props: {
   value: DiaryTextFormat;
-  onChange: (next: DiaryTextFormat) => void;
+  onApplyFontFamily: (fontFamily: DiaryFontFamily) => void;
+  onApplyFontSize: (fontSize: number) => void;
   onApplyTextColor: (color: string) => void;
 }): JSX.Element {
   return (
     <div className="fmt-toolbar">
       <select
         className="fmt-select"
-        value={props.value.fontFamily}
+        defaultValue={props.value.fontFamily}
         onChange={(e) =>
-          props.onChange({
-            ...props.value,
-            fontFamily: e.target.value as DiaryFontFamily,
-          })
+          props.onApplyFontFamily(e.target.value as DiaryFontFamily)
         }
       >
         <option value="system">기본</option>
@@ -692,10 +968,8 @@ function FormatToolbar(props: {
 
       <select
         className="fmt-select"
-        value={props.value.fontSize}
-        onChange={(e) =>
-          props.onChange({ ...props.value, fontSize: Number(e.target.value) })
-        }
+        defaultValue={props.value.fontSize}
+        onChange={(e) => props.onApplyFontSize(Number(e.target.value))}
       >
         {[12, 13, 14, 15, 16, 17, 18, 20, 22, 24].map((size) => (
           <option key={size} value={size}>
@@ -734,6 +1008,46 @@ function plainTextToHtml(text: string): string {
   return escapeHtml(text).replace(/\r?\n/g, "<br>");
 }
 
+function restoreSelection(range: Range | null): Selection | null {
+  const selection = window.getSelection();
+  if (!selection || !range || range.collapsed) return null;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return selection;
+}
+
+function applySelectionFormat(
+  range: Range | null,
+  command: "fontName" | "foreColor",
+  value: string,
+): void {
+  if (!restoreSelection(range)) return;
+  document.execCommand("styleWithCSS", false, "true");
+  document.execCommand(command, false, value);
+  notifyEditorChanged();
+}
+
+function applySelectionFontSize(range: Range | null, fontSize: number): void {
+  if (!restoreSelection(range)) return;
+  document.execCommand("styleWithCSS", false, "false");
+  document.execCommand("fontSize", false, "7");
+  document
+    .querySelectorAll<HTMLFontElement>('.r-editor font[size="7"]')
+    .forEach((font) => {
+      const span = document.createElement("span");
+      span.style.fontSize = `${fontSize}px`;
+      span.innerHTML = font.innerHTML;
+      font.replaceWith(span);
+    });
+  notifyEditorChanged();
+}
+
+function notifyEditorChanged(): void {
+  document
+    .querySelector(".r-editor")
+    ?.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function sanitizeBodyHtml(html: string): string {
   const documentFragment = new DOMParser().parseFromString(html, "text/html");
 
@@ -747,9 +1061,16 @@ function sanitizeBodyHtml(html: string): string {
     const tag = node.tagName.toLowerCase();
     if (tag === "br") return "<br>";
     if (tag === "span") {
-      const color = node.style.color;
-      return isSafeTextColor(color)
-        ? `<span style="color: ${escapeHtml(color)}">${children}</span>`
+      const styles = [
+        isSafeTextColor(node.style.color) &&
+          `color: ${escapeHtml(node.style.color)}`,
+        isSafeFontFamily(node.style.fontFamily) &&
+          `font-family: ${escapeHtml(node.style.fontFamily)}`,
+        isSafeFontSize(node.style.fontSize) &&
+          `font-size: ${escapeHtml(node.style.fontSize)}`,
+      ].filter(Boolean);
+      return styles.length > 0
+        ? `<span style="${styles.join("; ")}">${children}</span>`
         : children;
     }
     if (tag === "div" || tag === "p") return `${children}<br>`;
@@ -760,6 +1081,24 @@ function sanitizeBodyHtml(html: string): string {
     .map(sanitizeNode)
     .join("")
     .replace(/(?:<br>)+$/, "");
+}
+
+function isSafeFontFamily(fontFamily: string): boolean {
+  const normalized = normalizeFontFamily(fontFamily);
+  return Object.values(FONT_STYLE_MAP).some(
+    (allowed) => normalizeFontFamily(allowed) === normalized,
+  ) || Object.values(FONT_COMMAND_MAP).some(
+    (allowed) => normalizeFontFamily(allowed) === normalized,
+  );
+}
+
+function normalizeFontFamily(fontFamily: string): string {
+  return fontFamily.replace(/["']/g, "").replace(/\s+/g, " ").toLowerCase();
+}
+
+function isSafeFontSize(fontSize: string): boolean {
+  const size = Number(fontSize.replace(/px$/i, ""));
+  return fontSize.endsWith("px") && size >= 12 && size <= 24;
 }
 
 function isSafeTextColor(color: string): boolean {
@@ -1177,6 +1516,17 @@ function RichContentPreview(props: {
           <span>{turn.text}</span>
         </div>
       ))}
+      {rich?.facts && rich.facts.length > 0 && (
+        <div className="rich-facts">
+          <div className="rich-facts-title">페이지에서 찾은 구체적 정보</div>
+          {rich.facts.slice(0, 8).map((fact, index) => (
+            <div key={`${fact.subject}-${index}`} className="rich-fact">
+              <b>{fact.subject}</b>
+              <span>{fact.detail}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {episode.headings && episode.headings.length > 0 && (
         <div className="rich-headings">
           {episode.headings.slice(0, 3).map((heading) => (

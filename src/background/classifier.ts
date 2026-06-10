@@ -633,6 +633,12 @@ function compactRichContent(content?: RichContent): RichContent | undefined {
       heading: section.heading?.slice(0, 200),
       text: section.text.slice(0, 1_200),
     })),
+    facts: content.facts?.slice(0, 20).map((fact) => ({
+      subject: fact.subject.slice(0, 160),
+      detail: fact.detail.slice(0, 900),
+      kind: fact.kind,
+      source: fact.source,
+    })),
     conversationTurns: content.conversationTurns?.slice(-6).map((turn) => ({
       role: turn.role,
       text: turn.text.slice(0, 2_000),
