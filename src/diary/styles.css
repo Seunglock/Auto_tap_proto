@@ -193,6 +193,7 @@ button {
 }
 
 .face.right {
+    position: relative;
     background:
         repeating-linear-gradient(
             transparent,
@@ -673,6 +674,45 @@ button {
     color: #c5afd5;
 }
 
+.rich-body-details {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.55);
+    padding: 8px 10px;
+}
+
+.rich-body-details summary {
+    color: var(--accent);
+    cursor: pointer;
+    font-weight: 800;
+}
+
+.rich-sections {
+    display: grid;
+    gap: 12px;
+    max-height: 520px;
+    overflow: auto;
+    margin-top: 10px;
+}
+
+.rich-sections section {
+    border-left: 2px solid var(--accent-soft);
+    padding-left: 10px;
+}
+
+.rich-sections p,
+.rich-body-text {
+    margin: 5px 0 0;
+    color: var(--ink-soft);
+    line-height: 1.7;
+    white-space: pre-wrap;
+}
+
+.rich-body-text {
+    max-height: 520px;
+    overflow: auto;
+}
+
 .legend {
     margin-bottom: 18px;
 }
@@ -911,13 +951,17 @@ button {
 }
 
 .btn-edit {
-    border: 1px solid var(--line);
+    position: relative;
+    z-index: 2;
+    border: 1px solid var(--accent);
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.75);
-    color: var(--accent);
+    background: var(--accent);
+    color: #fff;
     font-size: 12px;
     font-weight: 800;
-    padding: 5px 12px;
+    padding: 7px 14px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(107, 63, 160, 0.2);
 }
 
 .fmt-toolbar {

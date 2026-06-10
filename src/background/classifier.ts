@@ -25,6 +25,7 @@ import type {
   ExtractedContent,
   GroupDocument,
   GroupRecord,
+  RichContent,
   Settings,
   TabState,
 } from "@/shared/types";
@@ -342,6 +343,9 @@ async function applyDocumentToGroup(
     url: content.url ?? "",
     domain,
     snippet: (content.contentSnippet ?? "").slice(0, 300),
+    pageType: content.pageType,
+    headings: content.headings?.slice(0, 8),
+    richContent: compactRichContent(content.richContent),
     tokens,
     embedding: embedding.slice(),
     collectedAt: Date.now(),
@@ -582,6 +586,9 @@ async function createNewGroup(
         url: content.url ?? "",
         domain,
         snippet: (content.contentSnippet ?? "").slice(0, 300),
+        pageType: content.pageType,
+        headings: content.headings?.slice(0, 8),
+        richContent: compactRichContent(content.richContent),
         tokens,
         embedding: embedding.slice(),
         collectedAt: Date.now(),
@@ -615,6 +622,27 @@ async function createNewGroup(
   }
 
   return tempGroup;
+}
+
+function compactRichContent(content?: RichContent): RichContent | undefined {
+  if (!content) return undefined;
+  return {
+    summary: content.summary?.slice(0, 1_200),
+    bodyText: content.bodyText?.slice(0, 6_000),
+    sections: content.sections?.slice(0, 5).map((section) => ({
+      heading: section.heading?.slice(0, 200),
+      text: section.text.slice(0, 1_200),
+    })),
+    conversationTurns: content.conversationTurns?.slice(-6).map((turn) => ({
+      role: turn.role,
+      text: turn.text.slice(0, 2_000),
+    })),
+    codeBlocks: content.codeBlocks?.slice(0, 3).map((block) => ({
+      language: block.language,
+      code: block.code.slice(0, 1_500),
+    })),
+    video: content.video,
+  };
 }
 
 async function joinChromeGroup(

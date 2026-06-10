@@ -484,8 +484,13 @@ function EntryView(props: {
                 <div className="r-head-row">
                   <div className="r-head">오늘의 일기</div>
                   {!isEditing && (
-                    <button className="btn-edit" onClick={startEdit}>
-                      ✎ 편집
+                    <button
+                      type="button"
+                      className="btn-edit"
+                      data-testid="edit-diary-body"
+                      onClick={startEdit}
+                    >
+                      본문 편집
                     </button>
                   )}
                 </div>
@@ -1050,6 +1055,26 @@ function RichContentPreview(props: {
       {!rich?.video && !rich?.conversationTurns?.length && (
         <p className="rich-summary">{rich?.summary ?? episode.snippet}</p>
       )}
+      {!rich?.video &&
+        !rich?.conversationTurns?.length &&
+        rich?.bodyText &&
+        rich.bodyText.length > (rich.summary?.length ?? 0) && (
+          <details className="rich-body-details">
+            <summary>추출된 페이지 본문</summary>
+            {rich.sections && rich.sections.length > 0 ? (
+              <div className="rich-sections">
+                {rich.sections.map((section, index) => (
+                  <section key={`${section.heading ?? "section"}-${index}`}>
+                    {section.heading && <b>{section.heading}</b>}
+                    <p>{section.text}</p>
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <p className="rich-body-text">{rich.bodyText}</p>
+            )}
+          </details>
+        )}
     </div>
   );
 }

@@ -33,6 +33,10 @@ function buildExtracted(): ExtractedContent {
     const snippet = safeRun(extractor);
     const pageType: PageType = aiChat ? "ai-chat" : "search";
     const conversationTurns = aiChat ? extractConversationTurns(host) : [];
+    const bodyText =
+      conversationTurns.length > 0
+        ? formatConversationBody(conversationTurns)
+        : snippet.slice(0, 16_000);
     return {
       title,
       url: location.href,
@@ -42,7 +46,8 @@ function buildExtracted(): ExtractedContent {
       extractionSource: "site-extractor",
       extractionConfidence: snippet.length > 100 ? 0.85 : 0.5,
       richContent: {
-        summary: snippet.slice(0, 900),
+        summary: snippet.slice(0, 1_800),
+        bodyText,
         conversationTurns:
           conversationTurns.length > 0 ? conversationTurns : undefined,
       },
@@ -53,27 +58,33 @@ function buildExtracted(): ExtractedContent {
   const core = safeRunCoreContent();
   const pageType = detectPageType(host, location.pathname);
   const video = pageType === "video" ? extractVideoContent() : undefined;
+  const description = extractMetaDescription();
 
-  // Fall back to old extractor if core produced nothing
   const videoSnippet = video
     ? [video.videoTitle, video.channel, video.description]
         .filter(Boolean)
         .join(" | ")
     : "";
-  const snippet =
-    videoSnippet || (core.text.length > 0 ? core.text : safeRun(pickExtractor()));
+  const snippet = videoSnippet || joinDistinct([description, core.text]);
+  const fallbackSnippet = snippet || safeRun(pickExtractor());
+  const bodyText =
+    pageType === "video"
+      ? video?.description ?? fallbackSnippet
+      : core.bodyText || fallbackSnippet;
 
   return {
     title,
     url: location.href,
-    contentSnippet: snippet.slice(0, 900),
+    contentSnippet: fallbackSnippet.slice(0, 1_800),
     headings: core.headings,
     pageType,
     extractionSource:
       core.confidence >= 0.55 ? "core-content" : "metadata-only",
     extractionConfidence: core.confidence,
     richContent: {
-      summary: snippet.slice(0, 900),
+      summary: fallbackSnippet.slice(0, 1_800),
+      bodyText: bodyText.slice(0, 16_000),
+      sections: core.sections.length > 0 ? core.sections : undefined,
       codeBlocks: core.codeBlocks.length > 0 ? core.codeBlocks : undefined,
       video,
     },
@@ -86,6 +97,43 @@ function extractConversationTurns(host: string) {
   if (host === "gemini.google.com" || host === "bard.google.com")
     return extractGeminiTurns();
   return extractChatGPTTurns();
+}
+
+function formatConversationBody(
+  turns: Array<{ role: "user" | "assistant"; text: string }>,
+): string {
+  return turns
+    .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.text}`)
+    .join("\n\n")
+    .slice(0, 16_000);
+}
+
+function extractMetaDescription(): string {
+  const selectors = [
+    'meta[name="description"]',
+    'meta[property="og:description"]',
+    'meta[name="twitter:description"]',
+  ];
+  for (const selector of selectors) {
+    const value = (document.querySelector(selector) as HTMLMetaElement | null)
+      ?.content?.replace(/\s+/g, " ")
+      .trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function joinDistinct(parts: string[]): string {
+  const seen = new Set<string>();
+  return parts
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .filter((part) => {
+      const key = part.toLowerCase().slice(0, 160);
+      if (!part || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(" | ");
 }
 
 function safeRun(fn: () => string): string {
@@ -104,7 +152,9 @@ function safeRunCoreContent(): import("./core-content").CoreContentResult {
     console.warn("[auto-tab-group] core-content extraction failed", err);
     return {
       text: "",
+      bodyText: "",
       headings: [],
+      sections: [],
       codeBlocks: [],
       confidence: 0,
       source: "fallback",

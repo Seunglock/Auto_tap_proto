@@ -177,6 +177,7 @@ export async function recordDiaryEpisodeFromClassification(
     input.content.title,
     input.content.url,
     input.content.contentSnippet,
+    input.content.richContent?.bodyText?.slice(0, 4_000),
     input.group.label,
     groupKeywords.join(" "),
   ].join(" ");
@@ -634,6 +635,8 @@ async function generateWithGemini(
       title: episode.title,
       pageType: episode.pageType,
       summary: episode.richContent?.summary ?? episode.snippet,
+      bodyText: episode.richContent?.bodyText?.slice(0, 4_000),
+      sections: episode.richContent?.sections?.slice(0, 4),
       headings: episode.headings?.slice(0, 3),
       video: episode.richContent?.video,
       conversationTurns: episode.richContent?.conversationTurns?.slice(-3),

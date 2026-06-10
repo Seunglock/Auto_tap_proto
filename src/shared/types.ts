@@ -43,8 +43,15 @@ export type VideoContent = {
   description?: string;
 };
 
+export type ContentSection = {
+  heading?: string;
+  text: string;
+};
+
 export type RichContent = {
   summary?: string;
+  bodyText?: string;
+  sections?: ContentSection[];
   conversationTurns?: ConversationTurn[];
   codeBlocks?: CodeBlock[];
   video?: VideoContent;
@@ -69,6 +76,9 @@ export type GroupDocument = {
   url: string;
   domain: string;
   snippet: string;
+  pageType?: PageType;
+  headings?: string[];
+  richContent?: RichContent;
   tokens: string[];
   embedding: number[];
   collectedAt: number;
