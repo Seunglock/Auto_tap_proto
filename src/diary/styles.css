@@ -436,11 +436,12 @@ button {
 }
 
 .tag-postit {
+    position: relative;
     border: 0;
     border-radius: 2px;
     background: #fff0a8;
     color: #664b24;
-    padding: 11px 13px 15px;
+    padding: 0;
     font-size: 11px;
     font-weight: 900;
     transform: rotate(var(--postit-tilt));
@@ -448,6 +449,41 @@ button {
     transition:
         transform 0.16s ease,
         box-shadow 0.16s ease;
+}
+
+.tag-postit-select {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    padding: 11px 25px 15px 13px;
+    font: inherit;
+}
+
+.tag-postit-select small {
+    margin-left: 4px;
+    color: rgba(102, 75, 36, 0.65);
+    font-size: 8px;
+}
+
+.tag-postit-delete {
+    position: absolute;
+    top: 2px;
+    right: 3px;
+    display: grid;
+    place-items: center;
+    width: 19px;
+    height: 19px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: rgba(102, 75, 36, 0.55);
+    font-size: 14px;
+    font-weight: 900;
+}
+
+.tag-postit-delete:hover {
+    background: rgba(255, 255, 255, 0.55);
+    color: #8f3d4e;
 }
 
 .tag-postit:nth-child(3n + 2) {

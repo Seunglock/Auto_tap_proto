@@ -9,6 +9,7 @@ import type {
   GetDiarySettingsResponse,
   GetDiaryWeekResponse,
   SaveDiaryEntryResponse,
+  UpdateDiaryHiddenTagsResponse,
 } from "@/shared/messages";
 import type {
   DiaryAnalysis,
@@ -25,6 +26,7 @@ import type {
 import aliceUrl from "./assets/alice.png";
 import rabbitUrl from "./assets/rabbit.png";
 import timelinePathUrl from "./assets/timeline-path.png";
+import { clusterTags } from "@/shared/tag-utils";
 
 type ViewKey = "entry" | "timeline" | "board" | "analysis";
 
@@ -259,6 +261,23 @@ function App(): JSX.Element {
     }
   }
 
+  async function saveHiddenTags(
+    dateKey: string,
+    hiddenTags: string[],
+  ): Promise<void> {
+    const response = (await chrome.runtime.sendMessage({
+      type: "UPDATE_DIARY_HIDDEN_TAGS",
+      dateKey,
+      hiddenTags,
+    })) as UpdateDiaryHiddenTagsResponse;
+    setDay((prev) =>
+      prev?.dateKey === dateKey
+        ? { ...prev, hiddenTags: response.hiddenTags }
+        : prev,
+    );
+    setStatus("태그 숨김 저장 완료");
+  }
+
   const railDates = useMemo(() => {
     if (week) return week.days.map((d) => d.dateKey);
     return [-3, -2, -1, 0].map((offset) => addDays(selectedDate, offset));
@@ -312,6 +331,7 @@ function App(): JSX.Element {
           onNext={() => setSelectedDate(addDays(selectedDate, 1))}
           onGenerate={generateEntry}
           onSaveEntry={saveDiaryEntryPatch}
+          onSaveHiddenTags={saveHiddenTags}
           busy={busy}
         />
       )}
@@ -355,6 +375,7 @@ function EntryView(props: {
     dateKey: string,
     patch: DiaryEntryPatch,
   ) => Promise<DiaryEntry>;
+  onSaveHiddenTags: (dateKey: string, hiddenTags: string[]) => Promise<void>;
   busy: boolean;
 }): JSX.Element {
   const { day } = props;
@@ -618,6 +639,7 @@ function EntryView(props: {
             day={day}
             entry={entry}
             onSaveEntry={props.onSaveEntry}
+            onSaveHiddenTags={props.onSaveHiddenTags}
           />
         </div>
         <button className="arrow" onClick={props.onNext} aria-label="다음 날">
@@ -635,19 +657,22 @@ function TagWorkspace(props: {
   day: DiaryDay;
   entry: DiaryEntry | null;
   onSaveEntry: (dateKey: string, patch: DiaryEntryPatch) => Promise<DiaryEntry>;
+  onSaveHiddenTags: (dateKey: string, hiddenTags: string[]) => Promise<void>;
 }): JSX.Element {
-  const tags = useMemo(
-    () =>
-      [
-        ...new Set([
-          ...(props.entry?.tags ?? []),
-          ...props.day.topKeywords,
-          ...props.day.episodes.flatMap((episode) => episode.keywords),
-        ]),
-      ].slice(0, 14),
+  const tagClusters = useMemo(
+    () => {
+      const hidden = new Set(props.day.hiddenTags.map(normalizeTag));
+      return clusterTags([
+        ...(props.entry?.tags ?? []),
+        ...props.day.topKeywords,
+        ...props.day.episodes.flatMap((episode) => episode.keywords),
+      ]).filter((cluster) =>
+        cluster.aliases.every((tag) => !hidden.has(normalizeTag(tag))),
+      );
+    },
     [props.day, props.entry],
   );
-  const [selectedTag, setSelectedTag] = useState(tags[0] ?? "");
+  const [selectedTag, setSelectedTag] = useState(tagClusters[0]?.label ?? "");
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [bodyDraft, setBodyDraft] = useState("");
@@ -658,11 +683,16 @@ function TagWorkspace(props: {
 
   const relatedEpisodes = useMemo(
     () =>
-      props.day.episodes.filter(
-        (episode) =>
-          !episode.isSensitive && episodeMatchesTag(episode, selectedTag),
-      ),
-    [props.day.episodes, selectedTag],
+      props.day.episodes.filter((episode) => {
+        const aliases =
+          tagClusters.find((cluster) => cluster.label === selectedTag)?.aliases ??
+          [selectedTag];
+        return (
+          !episode.isSensitive &&
+          aliases.some((alias) => episodeMatchesTag(episode, alias))
+        );
+      }),
+    [props.day.episodes, selectedTag, tagClusters],
   );
   const generatedBody = useMemo(
     () => buildTagViewBody(selectedTag, relatedEpisodes),
@@ -677,8 +707,9 @@ function TagWorkspace(props: {
   const visibleFormat = savedNote?.format ?? DEFAULT_ENTRY_FORMAT;
 
   useEffect(() => {
-    if (!tags.includes(selectedTag)) setSelectedTag(tags[0] ?? "");
-  }, [selectedTag, tags]);
+    if (!tagClusters.some((cluster) => cluster.label === selectedTag))
+      setSelectedTag(tagClusters[0]?.label ?? "");
+  }, [selectedTag, tagClusters]);
 
   useEffect(() => {
     setIsEditing(false);
@@ -724,24 +755,49 @@ function TagWorkspace(props: {
     }
   }
 
+  async function hideTag(label: string): Promise<void> {
+    const cluster = tagClusters.find((item) => item.label === label);
+    const aliases = cluster?.aliases ?? [label];
+    await props.onSaveHiddenTags(props.day.dateKey, [
+      ...props.day.hiddenTags,
+      ...aliases,
+    ]);
+  }
+
   return (
     <aside className="tag-workspace">
       <div className="tag-postits" aria-label="태그 포스트잇">
-        {tags.length > 0 ? (
-          tags.map((tag, index) => (
-            <button
-              key={tag}
-              type="button"
-              className={`tag-postit ${selectedTag === tag ? "on" : ""}`}
+        {tagClusters.length > 0 ? (
+          tagClusters.map((cluster, index) => (
+            <div
+              key={cluster.label}
+              className={`tag-postit ${selectedTag === cluster.label ? "on" : ""}`}
               style={
                 {
                   "--postit-tilt": `${(index % 3) * 1.5 - 1.5}deg`,
                 } as CSSProperties
               }
-              onClick={() => setSelectedTag(tag)}
             >
-              #{tag}
-            </button>
+              <button
+                type="button"
+                className="tag-postit-select"
+                onClick={() => setSelectedTag(cluster.label)}
+              >
+                #{cluster.label}
+                {cluster.aliases.length > 1 && (
+                  <small>+{cluster.aliases.length - 1}</small>
+                )}
+              </button>
+              <button
+                type="button"
+                className="tag-postit-delete"
+                aria-label={`${cluster.label} 태그 숨기기`}
+                title="이 태그 숨기기"
+                onClick={() => void hideTag(cluster.label)}
+              >
+                ×
+              </button>
+            </div>
           ))
         ) : (
           <span className="tag-postit-empty">수집된 태그가 없습니다.</span>
@@ -869,7 +925,9 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
   const lines = [`#${tag} 관련 수집 내용`];
   const seenFacts = new Set<string>();
   for (const episode of episodes.slice(0, 10)) {
-    const facts = episode.richContent?.facts ?? [];
+    const facts = (episode.richContent?.facts ?? []).filter((fact) =>
+      isUsefulCollectedText(`${fact.subject} ${fact.detail}`),
+    );
     if (facts.length > 0) {
       for (const fact of facts.slice(0, 5)) {
         const key = `${fact.subject}|${fact.detail.slice(0, 120)}`;
@@ -880,9 +938,18 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
       continue;
     }
     const summary = episode.richContent?.summary ?? episode.snippet;
-    if (summary) lines.push(`• ${episode.title || episode.domain}: ${summary}`);
+    if (summary && isUsefulCollectedText(summary))
+      lines.push(`• ${episode.title || episode.domain}: ${summary}`);
   }
   return lines.join("\n\n");
+}
+
+function isUsefulCollectedText(value: string): boolean {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length < 20) return false;
+  return !/(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|쿠키|광고|협찬|copyright|sign\s?in|log\s?in|subscribe|follow|share|comment|privacy|cookie|sponsor)/i.test(
+    text,
+  );
 }
 
 function RichBodyEditor(props: {

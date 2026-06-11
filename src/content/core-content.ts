@@ -33,20 +33,30 @@ const NOISE_SELECTOR = [
   "[hidden]",
   ".advertisement",
   ".ads",
+  ".author",
+  ".breadcrumb",
+  ".comment",
+  ".comments",
   ".cookie",
   ".modal",
   ".newsletter",
+  ".pagination",
+  ".profile",
   ".recommend",
   ".related",
   ".share",
   ".sidebar",
   ".social",
+  ".sponsor",
+  ".toc",
 ].join(",");
 
 const POSITIVE_PATTERN =
   /(article|body|content|detail|entry|main|post|read|story|text)/i;
 const NEGATIVE_PATTERN =
   /(ad-|advert|breadcrumb|comment|cookie|footer|header|menu|nav|promo|recommend|related|share|sidebar|social|sponsor|widget)/i;
+const NOISE_TEXT =
+  /^(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|copyright|sign\s?in|log\s?in|subscribe|follow|share|comments?)$/i;
 
 type Candidate = {
   element: Element;
@@ -165,7 +175,7 @@ function cleanCandidateText(root: Element): string {
         ? tableToText(node)
         : normalizeText(node.textContent ?? ""),
     )
-    .filter((text) => text.length >= 2);
+    .filter((text) => text.length >= 2 && !NOISE_TEXT.test(text));
   const deduped = dedupeTextBlocks(blocks);
   if (deduped.length > 0) return deduped.join("\n\n").slice(0, MAX_BODY_CHARS);
   return normalizeText(clone.innerText ?? clone.textContent ?? "").slice(

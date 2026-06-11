@@ -136,6 +136,7 @@ export type StorageSchema = {
   settings: Settings;
   diaryEpisodes: Record<string, DiaryEpisode>;
   diaryEntries: Record<string, DiaryEntry>;
+  diaryHiddenTags: Record<string, string[]>;
   diarySettings: DiarySettings;
 };
 
@@ -263,6 +264,7 @@ export type DiaryDay = {
   dateKey: string;
   episodes: DiaryEpisode[];
   topKeywords: string[];
+  hiddenTags: string[];
   topGroups: DiaryGroupSummary[];
   topDomains: DiaryDomainSummary[];
   stats: DiaryStats;

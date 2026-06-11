@@ -2,6 +2,7 @@ import { hashString } from "./embedder";
 import { tokenize } from "./labeling";
 import { getAllGroups, getTabState } from "./storage";
 import { isInternalUrl, isLocalHost } from "./tab-filters";
+import { filterUsefulTags } from "@/shared/tag-utils";
 import type {
   DiaryAnalysis,
   DiaryCategoryKey,
@@ -20,6 +21,7 @@ import type {
 const DIARY_KEYS = {
   episodes: "diaryEpisodes",
   entries: "diaryEntries",
+  hiddenTags: "diaryHiddenTags",
   settings: "diarySettings",
 } as const;
 
@@ -282,15 +284,21 @@ export async function backfillHistory(days?: number): Promise<number> {
 
 export async function getDiaryDay(date?: string): Promise<DiaryDay> {
   const target = date ?? dateKey(Date.now());
-  const [episodes, entries] = await Promise.all([
+  const [episodes, entries, hiddenTags] = await Promise.all([
     getAllDiaryEpisodes(),
     getAllDiaryEntries(),
+    getAllDiaryHiddenTags(),
   ]);
   const dayEpisodes = Object.values(episodes)
     .filter((episode) => episode.dateKey === target)
     .sort((a, b) => a.startedAt - b.startedAt);
 
-  return buildDiaryDay(target, dayEpisodes, entries[target] ?? null);
+  return buildDiaryDay(
+    target,
+    dayEpisodes,
+    entries[target] ?? null,
+    hiddenTags[target] ?? [],
+  );
 }
 
 export async function getDiaryWeek(date?: string): Promise<DiaryWeek> {
@@ -306,7 +314,7 @@ export async function getDiaryWeek(date?: string): Promise<DiaryWeek> {
     const dayEpisodes = episodes.filter(
       (episode) => episode.dateKey === currentKey,
     );
-    const day = buildDiaryDay(currentKey, dayEpisodes, null);
+    const day = buildDiaryDay(currentKey, dayEpisodes, null, []);
     days.push({
       dateKey: currentKey,
       label: formatDayLabel(current),
@@ -332,11 +340,12 @@ export async function getDiaryAnalysis(date?: string): Promise<DiaryAnalysis> {
       episode.dateKey <= week.endDateKey,
   );
   const safeEpisodes = episodes.filter((episode) => !episode.isSensitive);
-  const topKeywords = frequency(
-    safeEpisodes.flatMap((episode) => episode.keywords),
-  )
-    .slice(0, 20)
-    .map(([keyword, count]) => ({ keyword, count }));
+  const keywordCounts = new Map(
+    frequency(safeEpisodes.flatMap((episode) => episode.keywords)),
+  );
+  const topKeywords = filterUsefulTags([...keywordCounts.keys()], 20).map(
+    (keyword) => ({ keyword, count: keywordCounts.get(keyword) ?? 1 }),
+  );
   const topGroups = groupSummaries(safeEpisodes).slice(0, 6);
 
   return {
@@ -434,19 +443,40 @@ async function getAllDiaryEntries(): Promise<Record<string, DiaryEntry>> {
   return (result[DIARY_KEYS.entries] as Record<string, DiaryEntry>) ?? {};
 }
 
+async function getAllDiaryHiddenTags(): Promise<Record<string, string[]>> {
+  const result = await chrome.storage.local.get(DIARY_KEYS.hiddenTags);
+  return (result[DIARY_KEYS.hiddenTags] as Record<string, string[]>) ?? {};
+}
+
+export async function updateDiaryHiddenTags(
+  dateKey: string,
+  hiddenTags: string[],
+): Promise<string[]> {
+  const allHiddenTags = await getAllDiaryHiddenTags();
+  const next = [...new Set(hiddenTags.filter(Boolean))];
+  allHiddenTags[dateKey] = next;
+  await chrome.storage.local.set({ [DIARY_KEYS.hiddenTags]: allHiddenTags });
+  return next;
+}
+
 function buildDiaryDay(
   target: string,
   episodes: DiaryEpisode[],
   entry: DiaryEntry | null,
+  hiddenTags: string[],
 ): DiaryDay {
   const sorted = [...episodes].sort((a, b) => a.startedAt - b.startedAt);
   const safeEpisodes = sorted.filter((episode) => !episode.isSensitive);
   return {
     dateKey: target,
     episodes: sorted,
-    topKeywords: frequency(safeEpisodes.flatMap((episode) => episode.keywords))
-      .slice(0, 10)
-      .map(([keyword]) => keyword),
+    topKeywords: filterUsefulTags(
+      frequency(safeEpisodes.flatMap((episode) => episode.keywords)).map(
+        ([keyword]) => keyword,
+      ),
+      10,
+    ),
+    hiddenTags,
     topGroups: groupSummaries(safeEpisodes).slice(0, 6),
     topDomains: frequency(
       safeEpisodes.map((episode) => episode.domain).filter(Boolean),
@@ -546,9 +576,10 @@ function topKeywordsForGroup(
     ...group.documents.flatMap((doc) => doc.tokens),
     ...extraTokens,
   ];
-  return frequency(tokens)
-    .slice(0, 6)
-    .map(([keyword]) => keyword);
+  return filterUsefulTags(
+    frequency(tokens).map(([keyword]) => keyword),
+    6,
+  );
 }
 
 function detectSensitive(text: string): boolean {

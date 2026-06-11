@@ -5,6 +5,8 @@ const RELATION_CUES =
   /(인기|유명|판매|구입|맛볼|즐길|추천|대표|특산|먹거리|쇼핑|입장료|운영\s*시간|위치|명물|볼거리|살\s*수|먹을\s*수|known for|popular|famous|sells?|offers?|located|specialt(?:y|ies)|attraction)/i;
 const GENERIC_SUBJECT =
   /^(소개|개요|목차|본문|여행|관광|정보|관련|추천|더보기|overview|introduction|contents?|related|more)$/i;
+const NOISE_TEXT =
+  /(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|쿠키|광고|협찬|문의|copyright|sign\s?in|log\s?in|subscribe|follow|share|comment|privacy|cookie|sponsor)/i;
 
 export function extractFactualContent(
   core: CoreContentResult,
@@ -93,9 +95,10 @@ function extractCardFacts(): ContentFact[] {
     "[class*='spot']",
     "[class*='attraction']",
     "[class*='product']",
-    "[class*='item']",
-    "main li",
-    "[role='main'] li",
+    "[class*='poi']",
+    "[itemtype*='Place']",
+    "[itemtype*='Product']",
+    "[itemprop='itemListElement']",
     "dl",
   ];
 
@@ -112,7 +115,8 @@ function extractCardFacts(): ContentFact[] {
       if (
         !isUsefulSubject(subject) ||
         detail.length < 20 ||
-        detail.length > 1_200
+        detail.length > 1_200 ||
+        isNoiseText(`${subject} ${detail}`)
       )
         return;
       if (getLinkDensity(node) > 0.65) return;
@@ -130,7 +134,9 @@ function extractSectionFacts(core: CoreContentResult): ContentFact[] {
   return core.sections
     .filter(
       (section) =>
-        isUsefulSubject(section.heading ?? "") && section.text.length >= 30,
+        isUsefulSubject(section.heading ?? "") &&
+        section.text.length >= 30 &&
+        !isNoiseText(`${section.heading} ${section.text}`),
     )
     .map((section) => ({
       subject: cleanText(section.heading ?? "").slice(0, 160),
@@ -142,7 +148,7 @@ function extractSectionFacts(core: CoreContentResult): ContentFact[] {
 
 export function extractFactsFromText(
   bodyText: string,
-  pageTitle: string,
+  _pageTitle: string,
 ): ContentFact[] {
   const facts: ContentFact[] = [];
   const sentences = bodyText
@@ -151,11 +157,11 @@ export function extractFactsFromText(
     .filter((sentence) => sentence.length >= 30 && sentence.length <= 500);
 
   for (const sentence of sentences) {
-    if (!RELATION_CUES.test(sentence)) continue;
+    if (!RELATION_CUES.test(sentence) || isNoiseText(sentence)) continue;
     const subject =
       sentence.match(/^(.{2,50}?)(?:에서는|에서|에는|은|는|이|가)\s+/)?.[1] ??
-      sentence.match(/^([^:：\-–—]{2,80})[:：\-–—]\s*/)?.[1] ??
-      pageTitle;
+      sentence.match(/^([^:：\-–—]{2,80})[:：\-–—]\s*/)?.[1];
+    if (!subject) continue;
     if (!isUsefulSubject(subject)) continue;
     facts.push({
       subject: cleanText(subject).slice(0, 160),
@@ -241,7 +247,8 @@ function isUsefulSubject(subject: string): boolean {
   return (
     cleaned.length >= 2 &&
     cleaned.length <= 160 &&
-    !GENERIC_SUBJECT.test(cleaned)
+    !GENERIC_SUBJECT.test(cleaned) &&
+    !isNoiseText(cleaned)
   );
 }
 
@@ -252,7 +259,13 @@ function dedupeFacts(facts: ContentFact[]): ContentFact[] {
     const subject = cleanText(fact.subject);
     const detail = cleanText(fact.detail);
     const key = `${subject.toLowerCase()}|${detail.toLowerCase().slice(0, 180)}`;
-    if (!subject || detail.length < 20 || seen.has(key)) continue;
+    if (
+      !subject ||
+      detail.length < 20 ||
+      isNoiseText(`${subject} ${detail}`) ||
+      seen.has(key)
+    )
+      continue;
     seen.add(key);
     output.push({ ...fact, subject, detail });
   }
@@ -288,6 +301,12 @@ function joinValue(value: unknown): string {
 
 function cleanText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function isNoiseText(value: string): boolean {
+  const cleaned = cleanText(value);
+  if (NOISE_TEXT.test(cleaned)) return true;
+  return (cleaned.match(/[|·›»]/g) ?? []).length >= 6;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

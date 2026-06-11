@@ -68,7 +68,10 @@ function buildExtracted(): ExtractedContent {
   const pageType = detectPageType(host, location.pathname);
   const video = pageType === "video" ? extractVideoContent() : undefined;
   const description = extractMetaDescription();
-  const facts = extractFactualContent(core, title);
+  const facts =
+    pageType === "video"
+      ? extractFactsFromText(video?.description ?? "", title).slice(0, 12)
+      : extractFactualContent(core, title);
   const factSummary = summarizeFacts(facts);
 
   const videoSnippet = video
@@ -77,7 +80,7 @@ function buildExtracted(): ExtractedContent {
         .join(" | ")
     : "";
   const snippet =
-    videoSnippet || joinDistinct([factSummary, description, core.text]);
+    videoSnippet || joinDistinct([factSummary, core.text, description]);
   const fallbackSnippet = snippet || safeRun(pickExtractor());
   const bodyText =
     pageType === "video"
@@ -96,9 +99,15 @@ function buildExtracted(): ExtractedContent {
     richContent: {
       summary: (factSummary || fallbackSnippet).slice(0, 1_800),
       bodyText: bodyText.slice(0, 16_000),
-      sections: core.sections.length > 0 ? core.sections : undefined,
+      sections:
+        pageType !== "video" && core.sections.length > 0
+          ? core.sections
+          : undefined,
       facts: facts.length > 0 ? facts : undefined,
-      codeBlocks: core.codeBlocks.length > 0 ? core.codeBlocks : undefined,
+      codeBlocks:
+        pageType !== "video" && core.codeBlocks.length > 0
+          ? core.codeBlocks
+          : undefined,
       video,
     },
   };

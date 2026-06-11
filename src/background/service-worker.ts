@@ -25,6 +25,7 @@ import {
   getDiaryWeek,
   updateDiarySettings,
   saveDiaryEntry,
+  updateDiaryHiddenTags,
 } from "./diary";
 import type {
   AnyMessage,
@@ -38,6 +39,7 @@ import type {
   GetSettingsResponse,
   GetSummaryResponse,
   SaveDiaryEntryResponse,
+  UpdateDiaryHiddenTagsResponse,
 } from "@/shared/messages";
 import type { ClassificationOptions, TabState } from "@/shared/types";
 
@@ -418,6 +420,17 @@ async function handleMessage(
       const response: SaveDiaryEntryResponse = {
         type: "SAVE_DIARY_ENTRY_RESULT",
         entry,
+      };
+      return response;
+    }
+    case "UPDATE_DIARY_HIDDEN_TAGS": {
+      const hiddenTags = await updateDiaryHiddenTags(
+        message.dateKey,
+        message.hiddenTags,
+      );
+      const response: UpdateDiaryHiddenTagsResponse = {
+        type: "UPDATE_DIARY_HIDDEN_TAGS_RESULT",
+        hiddenTags,
       };
       return response;
     }

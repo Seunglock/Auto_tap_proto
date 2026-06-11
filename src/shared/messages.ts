@@ -154,6 +154,17 @@ export type SaveDiaryEntryResponse = {
   entry: DiaryEntry;
 };
 
+export type UpdateDiaryHiddenTagsRequest = {
+  type: "UPDATE_DIARY_HIDDEN_TAGS";
+  dateKey: string;
+  hiddenTags: string[];
+};
+
+export type UpdateDiaryHiddenTagsResponse = {
+  type: "UPDATE_DIARY_HIDDEN_TAGS_RESULT";
+  hiddenTags: string[];
+};
+
 export type AnyMessage =
   | ExtractRequest
   | ReclassifyRequest
@@ -171,4 +182,5 @@ export type AnyMessage =
   | BackfillHistoryRequest
   | GetDiarySettingsRequest
   | UpdateDiarySettingsRequest
+  | UpdateDiaryHiddenTagsRequest
   | SaveDiaryEntryRequest;

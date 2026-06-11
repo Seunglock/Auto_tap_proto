@@ -1,4 +1,5 @@
 import { STOPWORDS } from "@/shared/constants";
+import { isUsefulTag } from "@/shared/tag-utils";
 import type { GroupRecord } from "@/shared/types";
 
 const TOKEN_SPLIT = /[\s\p{P}\p{S}]+/u;
@@ -19,6 +20,7 @@ function isUsefulToken(t: string): boolean {
   if (NUMBER_LIKE.test(t)) return false;
   if (URL_LIKE.test(t)) return false;
   if (STOPWORDS.has(t)) return false;
+  if (!isUsefulTag(t)) return false;
   return true;
 }
 
