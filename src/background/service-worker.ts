@@ -261,9 +261,10 @@ async function runClassification(
 
   if (!settings.enabled) return;
 
-  // For URL changes on already-grouped tabs: bypass the "already-grouped" filter.
-  // For all other cases: apply the normal filter.
-  if (!isUrlChange && !shouldClassify(tab)) return;
+  // Auto-managed grouped tabs still need extraction on reload so their
+  // collected page content stays fresh. Other manually grouped tabs remain
+  // outside this extension's scope.
+  if (!isUrlChange && !shouldClassify(tab) && !tabState?.groupKey) return;
 
   // If this is a URL change but the URL ended up being the same, just clear dirty.
   if (isUrlChange && tabState?.lastUrl === tab.url) {

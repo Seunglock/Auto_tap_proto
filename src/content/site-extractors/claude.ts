@@ -6,15 +6,31 @@ export function extractClaudeTurns(): ConversationTurn[] {
       '[data-testid="user-message"], [data-testid="message"], main .prose',
     ),
   );
-  return nodes
+  const turns = nodes
     .map((node) => ({
-      role: node.matches('[data-testid="user-message"]')
+      role:
+        node.matches('[data-testid="user-message"]') ||
+        !!node.closest('[data-testid="user-message"]')
         ? ("user" as const)
         : ("assistant" as const),
-      text: (node as HTMLElement).innerText?.replace(/\s+/g, " ").trim() ?? "",
+      text: cleanConversationText((node as HTMLElement).innerText ?? ""),
     }))
     .filter((turn) => turn.text.length >= 4)
-    .slice(-8);
+  return dedupeTurns(turns).slice(-16);
+}
+
+function dedupeTurns(turns: ConversationTurn[]): ConversationTurn[] {
+  const seen = new Set<string>();
+  return turns.filter((turn) => {
+    const key = `${turn.role}:${turn.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function cleanConversationText(value: string): string {
+  return value.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export function extractClaude(): string {

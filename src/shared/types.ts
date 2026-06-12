@@ -32,6 +32,13 @@ export type ConversationTurn = {
   text: string;
 };
 
+export type ConversationInsight = {
+  question: string;
+  answerSummary: string;
+  keyPoints: string[];
+  actionItems?: string[];
+};
+
 export type CodeBlock = {
   language?: string;
   code: string;
@@ -61,6 +68,7 @@ export type RichContent = {
   sections?: ContentSection[];
   facts?: ContentFact[];
   conversationTurns?: ConversationTurn[];
+  conversationInsights?: ConversationInsight[];
   codeBlocks?: CodeBlock[];
   video?: VideoContent;
 };

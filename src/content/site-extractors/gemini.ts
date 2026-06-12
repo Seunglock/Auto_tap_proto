@@ -1,17 +1,39 @@
 import type { ConversationTurn } from "@/shared/types";
 
 export function extractGeminiTurns(): ConversationTurn[] {
-  return Array.from(
-    document.querySelectorAll(
-      "user-query, model-response, [data-test-id='conversation-turn']",
-    ),
-  )
+  const directNodes = Array.from(
+    document.querySelectorAll("user-query, model-response"),
+  );
+  const nodes =
+    directNodes.length > 0
+      ? directNodes
+      : Array.from(
+          document.querySelectorAll("[data-test-id='conversation-turn']"),
+        );
+  const turns = nodes
     .map((node) => ({
-      role: node.matches("user-query") ? ("user" as const) : ("assistant" as const),
-      text: (node as HTMLElement).innerText?.replace(/\s+/g, " ").trim() ?? "",
+      role:
+        node.matches("user-query") || !!node.querySelector("user-query")
+          ? ("user" as const)
+          : ("assistant" as const),
+      text: cleanConversationText((node as HTMLElement).innerText ?? ""),
     }))
     .filter((turn) => turn.text.length >= 4)
-    .slice(-8);
+  return dedupeTurns(turns).slice(-16);
+}
+
+function dedupeTurns(turns: ConversationTurn[]): ConversationTurn[] {
+  const seen = new Set<string>();
+  return turns.filter((turn) => {
+    const key = `${turn.role}:${turn.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function cleanConversationText(value: string): string {
+  return value.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export function extractGemini(): string {

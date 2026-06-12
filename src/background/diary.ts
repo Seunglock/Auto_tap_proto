@@ -3,6 +3,7 @@ import { tokenize } from "./labeling";
 import { getAllGroups, getTabState } from "./storage";
 import { isInternalUrl, isLocalHost } from "./tab-filters";
 import { filterUsefulTags } from "@/shared/tag-utils";
+import { mergeRichContent, richContentScore } from "@/shared/rich-content";
 import type {
   DiaryAnalysis,
   DiaryCategoryKey,
@@ -284,14 +285,18 @@ export async function backfillHistory(days?: number): Promise<number> {
 
 export async function getDiaryDay(date?: string): Promise<DiaryDay> {
   const target = date ?? dateKey(Date.now());
-  const [episodes, entries, hiddenTags] = await Promise.all([
+  const [episodes, entries, hiddenTags, groups] = await Promise.all([
     getAllDiaryEpisodes(),
     getAllDiaryEntries(),
     getAllDiaryHiddenTags(),
+    getAllGroups(),
   ]);
-  const dayEpisodes = Object.values(episodes)
+  const dayEpisodes = enrichEpisodesFromGroups(
+    Object.values(episodes)
     .filter((episode) => episode.dateKey === target)
-    .sort((a, b) => a.startedAt - b.startedAt);
+      .sort((a, b) => a.startedAt - b.startedAt),
+    groups,
+  );
 
   return buildDiaryDay(
     target,
@@ -299,6 +304,61 @@ export async function getDiaryDay(date?: string): Promise<DiaryDay> {
     entries[target] ?? null,
     hiddenTags[target] ?? [],
   );
+}
+
+function enrichEpisodesFromGroups(
+  episodes: DiaryEpisode[],
+  groups: Record<string, GroupRecord>,
+): DiaryEpisode[] {
+  const documentsByUrl = new Map<
+    string,
+    { document: GroupRecord["documents"][number]; group: GroupRecord }
+  >();
+  for (const group of Object.values(groups)) {
+    for (const document of group.documents) {
+      if (!document.url) continue;
+      const current = documentsByUrl.get(document.url);
+      if (
+        !current ||
+        richContentScore(document.richContent) >
+          richContentScore(current.document.richContent)
+      ) {
+        documentsByUrl.set(document.url, { document, group });
+      }
+    }
+  }
+
+  return episodes.map((episode) => {
+    const match = documentsByUrl.get(episode.url);
+    if (!match) return episode;
+    return {
+      ...episode,
+      snippet: preferLongerText(
+        episode.snippet,
+        match.document.snippet,
+        1_800,
+      ),
+      richContent: mergeRichContent(
+        episode.richContent,
+        match.document.richContent,
+      ),
+      pageType: episode.pageType ?? match.document.pageType,
+      headings:
+        episode.headings && episode.headings.length > 0
+          ? episode.headings
+          : match.document.headings,
+      groupKey: episode.groupKey ?? match.group.groupKey,
+      groupLabel: episode.groupLabel || match.group.label,
+      keywords: unique([
+        ...episode.keywords,
+        ...topKeywordsForGroup(match.group, match.document.tokens),
+      ]).slice(0, 12),
+      tokens: unique([...episode.tokens, ...match.document.tokens]).slice(
+        0,
+        30,
+      ),
+    };
+  });
 }
 
 export async function getDiaryWeek(date?: string): Promise<DiaryWeek> {
@@ -393,12 +453,35 @@ async function upsertDiaryEpisode(episode: DiaryEpisode): Promise<void> {
   episodes[episode.id] = existing
     ? {
         ...episode,
+        snippet: preferLongerText(existing.snippet, episode.snippet, 1_800),
+        richContent: mergeRichContent(existing.richContent, episode.richContent),
+        pageType: episode.pageType ?? existing.pageType,
+        headings:
+          episode.headings && episode.headings.length > 0
+            ? episode.headings
+            : existing.headings,
+        keywords: unique([...existing.keywords, ...episode.keywords]).slice(
+          0,
+          12,
+        ),
+        tokens: unique([...existing.tokens, ...episode.tokens]).slice(0, 30),
         createdAt: existing.createdAt,
         dateKey: dateKey(startedAt),
         startedAt,
       }
     : episode;
   await chrome.storage.local.set({ [DIARY_KEYS.episodes]: episodes });
+}
+
+function preferLongerText(
+  existing: string,
+  incoming: string,
+  maxChars: number,
+): string {
+  return (incoming.length >= existing.length ? incoming : existing).slice(
+    0,
+    maxChars,
+  );
 }
 
 async function resolveClassifiedEpisodeId(
@@ -667,6 +750,15 @@ function collectConcreteFacts(
   const facts: Array<{ subject: string; detail: string }> = [];
   for (const episode of day.episodes) {
     if (episode.isSensitive) continue;
+    for (const insight of episode.richContent?.conversationInsights ?? []) {
+      const key = `ai|${insight.question.toLowerCase().slice(0, 160)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push({
+        subject: `AI 대화: ${insight.question}`,
+        detail: insight.answerSummary,
+      });
+    }
     for (const fact of episode.richContent?.facts ?? []) {
       const key = `${fact.subject.toLowerCase()}|${fact.detail
         .toLowerCase()
@@ -704,6 +796,8 @@ async function generateWithGemini(
       headings: episode.headings?.slice(0, 3),
       video: episode.richContent?.video,
       conversationTurns: episode.richContent?.conversationTurns?.slice(-3),
+      conversationInsights:
+        episode.richContent?.conversationInsights?.slice(-4),
     })),
     domains: day.topDomains.map((domain) => domain.domain),
     keywords: day.topKeywords,

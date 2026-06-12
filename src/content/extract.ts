@@ -21,6 +21,10 @@ import {
   isSearchEngineHost,
   isAiChatHost,
 } from "@/shared/site-detection";
+import {
+  extractConversationInsights,
+  summarizeConversationInsights,
+} from "./conversation-insights";
 
 function buildExtracted(): ExtractedContent {
   const host = location.hostname;
@@ -38,13 +42,23 @@ function buildExtracted(): ExtractedContent {
     const snippet = safeRun(extractor);
     const pageType: PageType = aiChat ? "ai-chat" : "search";
     const conversationTurns = aiChat ? extractConversationTurns(host) : [];
+    const conversationInsights = aiChat
+      ? extractConversationInsights(conversationTurns)
+      : [];
+    const conversationSummary = summarizeConversationInsights(
+      conversationInsights,
+    );
     const bodyText =
       conversationTurns.length > 0
         ? formatConversationBody(conversationTurns)
         : snippet.slice(0, 16_000);
     const facts = extractFactsFromText(bodyText, title).slice(0, 20);
     const factSummary = summarizeFacts(facts);
-    const factualSnippet = joinDistinct([factSummary, snippet]).slice(0, 2_400);
+    const factualSnippet = joinDistinct([
+      conversationSummary,
+      factSummary,
+      snippet,
+    ]).slice(0, 2_400);
     return {
       title,
       url: location.href,
@@ -54,11 +68,13 @@ function buildExtracted(): ExtractedContent {
       extractionSource: "site-extractor",
       extractionConfidence: snippet.length > 100 ? 0.85 : 0.5,
       richContent: {
-        summary: (factSummary || snippet).slice(0, 1_800),
+        summary: (conversationSummary || factSummary || snippet).slice(0, 1_800),
         bodyText,
         facts: facts.length > 0 ? facts : undefined,
         conversationTurns:
           conversationTurns.length > 0 ? conversationTurns : undefined,
+        conversationInsights:
+          conversationInsights.length > 0 ? conversationInsights : undefined,
       },
     };
   }

@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import type { CSSProperties } from "react";
 import type {
@@ -390,6 +396,8 @@ function EntryView(props: {
   const [tagsDraft, setTagsDraft] = useState<string[]>([]);
   const [formatDraft, setFormatDraft] =
     useState<DiaryTextFormat>(DEFAULT_ENTRY_FORMAT);
+  const [bodyPageCount, setBodyPageCount] = useState(1);
+  const [bookSpread, setBookSpread] = useState(0);
   const selectedBodyRange = useRef<Range | null>(null);
 
   useEffect(() => {
@@ -403,7 +411,17 @@ function EntryView(props: {
   useEffect(() => {
     setIsEditing(false);
     setIsSaving(false);
+    setBookSpread(0);
   }, [day.dateKey]);
+
+  useEffect(() => {
+    setBookSpread(0);
+  }, [entry?.updatedAt, isEditing]);
+
+  useEffect(() => {
+    const maxSpread = Math.max(0, Math.ceil((bodyPageCount - 1) / 2));
+    setBookSpread((current) => Math.min(current, maxSpread));
+  }, [bodyPageCount]);
 
   function startEdit(): void {
     if (!entry) return;
@@ -444,6 +462,12 @@ function EntryView(props: {
   }
 
   const entryFormat = entry?.format ?? DEFAULT_ENTRY_FORMAT;
+  const entryBodyHtml = entry
+    ? sanitizeBodyHtml(entry.bodyHtml ?? plainTextToHtml(entry.body))
+    : "";
+  const maxBookSpread = Math.max(0, Math.ceil((bodyPageCount - 1) / 2));
+  const leftBodyPageIndex = bookSpread * 2 - 1;
+  const rightBodyPageIndex = bookSpread * 2;
 
   return (
     <main className="stage entry-stage">
@@ -457,8 +481,11 @@ function EntryView(props: {
           ‹
         </button>
         <div className="entry-content-grid">
+          <div className="book-with-turns">
           <section className="book">
           <div className="face left">
+            {bookSpread === 0 ? (
+              <>
             <div className="l-datebig">{shortDate(day.dateKey)}</div>
             <div className="l-dow">{dayName(day.dateKey)}</div>
             <div className="l-summary">
@@ -514,11 +541,31 @@ function EntryView(props: {
                 ))}
               </div>
             </div>
+              </>
+            ) : (
+              entry && (
+                <DiaryBodyPage
+                  html={entryBodyHtml}
+                  format={entryFormat}
+                  pageIndex={leftBodyPageIndex}
+                  pageCount={bodyPageCount}
+                />
+              )
+            )}
           </div>
 
           <div className="face right">
             {entry ? (
               <>
+                {bookSpread > 0 ? (
+                  <DiaryBodyPage
+                    html={entryBodyHtml}
+                    format={entryFormat}
+                    pageIndex={rightBodyPageIndex}
+                    pageCount={bodyPageCount}
+                  />
+                ) : (
+                  <>
                 <div className="r-head-row">
                   <div className="r-head">오늘의 일기</div>
                   {!isEditing && (
@@ -592,18 +639,17 @@ function EntryView(props: {
                 ) : (
                   <>
                     <div
-                      className="r-body"
-                      dangerouslySetInnerHTML={{
-                        __html: sanitizeBodyHtml(
-                          entry.bodyHtml ?? plainTextToHtml(entry.body),
-                        ),
-                      }}
-                      style={{
-                        fontFamily: FONT_STYLE_MAP[entryFormat.fontFamily],
-                        fontSize: `${entryFormat.fontSize}px`,
-                        color: entryFormat.textColor,
-                      }}
-                    />
+                      className="r-body-page-wrap"
+                    >
+                      <DiaryBodyPage
+                        html={entryBodyHtml}
+                        format={entryFormat}
+                        pageIndex={0}
+                        pageCount={bodyPageCount}
+                        onPageCount={setBodyPageCount}
+                        hideHeader
+                      />
+                    </div>
                     <div className="tags">
                       {entry.tags.map((tag) => (
                         <span key={tag} className="tag">
@@ -611,6 +657,8 @@ function EntryView(props: {
                         </span>
                       ))}
                     </div>
+                  </>
+                )}
                   </>
                 )}
               </>
@@ -635,6 +683,34 @@ function EntryView(props: {
             )}
           </div>
           </section>
+          {entry && !isEditing && bodyPageCount > 1 && (
+            <div className="page-turn-controls" aria-label="일기장 페이지 이동">
+              <button
+                type="button"
+                className="page-turn page-turn-prev"
+                onClick={() => setBookSpread((page) => Math.max(0, page - 1))}
+                disabled={bookSpread === 0}
+                aria-label="이전 장"
+              >
+                ‹
+              </button>
+              <span>
+                {bookSpread + 1} / {maxBookSpread + 1}
+              </span>
+              <button
+                type="button"
+                className="page-turn page-turn-next"
+                onClick={() =>
+                  setBookSpread((page) => Math.min(maxBookSpread, page + 1))
+                }
+                disabled={bookSpread === maxBookSpread}
+                aria-label="다음 장"
+              >
+                ›
+              </button>
+            </div>
+          )}
+          </div>
           <TagWorkspace
             day={day}
             entry={entry}
@@ -653,26 +729,85 @@ function EntryView(props: {
   );
 }
 
+function DiaryBodyPage(props: {
+  html: string;
+  format: DiaryTextFormat;
+  pageIndex: number;
+  pageCount: number;
+  onPageCount?: (pageCount: number) => void;
+  hideHeader?: boolean;
+}): JSX.Element {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const columnsRef = useRef<HTMLDivElement>(null);
+  const [pageWidth, setPageWidth] = useState(1);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const columns = columnsRef.current;
+    if (!viewport || !columns) return;
+
+    const updateLayout = (): void => {
+      const width = Math.max(1, viewport.clientWidth);
+      columns.style.width = `${width}px`;
+      columns.style.columnWidth = `${width}px`;
+      setPageWidth(width);
+      requestAnimationFrame(() => {
+        const count = Math.max(1, Math.ceil(columns.scrollWidth / width));
+        props.onPageCount?.(count);
+      });
+    };
+
+    updateLayout();
+    const observer = new ResizeObserver(updateLayout);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [props.html, props.format, props.onPageCount]);
+
+  return (
+    <div className="diary-page">
+      {!props.hideHeader && (
+        <div className="diary-page-head">
+          오늘의 일기
+          <span>
+            {Math.min(props.pageIndex + 1, props.pageCount)} / {props.pageCount}
+          </span>
+        </div>
+      )}
+      <div ref={viewportRef} className="diary-page-viewport">
+        <div
+          ref={columnsRef}
+          className="diary-page-columns r-body"
+          dangerouslySetInnerHTML={{ __html: props.html }}
+          style={{
+            width: `${pageWidth}px`,
+            columnWidth: `${pageWidth}px`,
+            transform: `translateX(-${props.pageIndex * pageWidth}px)`,
+            fontFamily: FONT_STYLE_MAP[props.format.fontFamily],
+            fontSize: `${props.format.fontSize}px`,
+            color: props.format.textColor,
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function TagWorkspace(props: {
   day: DiaryDay;
   entry: DiaryEntry | null;
   onSaveEntry: (dateKey: string, patch: DiaryEntryPatch) => Promise<DiaryEntry>;
   onSaveHiddenTags: (dateKey: string, hiddenTags: string[]) => Promise<void>;
 }): JSX.Element {
-  const tagClusters = useMemo(
+  const tagTopics = useMemo(
     () => {
       const hidden = new Set(props.day.hiddenTags.map(normalizeTag));
-      return clusterTags([
-        ...(props.entry?.tags ?? []),
-        ...props.day.topKeywords,
-        ...props.day.episodes.flatMap((episode) => episode.keywords),
-      ]).filter((cluster) =>
-        cluster.aliases.every((tag) => !hidden.has(normalizeTag(tag))),
+      return buildPrimaryTagTopics(props.day.episodes).filter((topic) =>
+        topic.aliases.every((tag) => !hidden.has(normalizeTag(tag))),
       );
     },
-    [props.day, props.entry],
+    [props.day],
   );
-  const [selectedTag, setSelectedTag] = useState(tagClusters[0]?.label ?? "");
+  const [selectedTag, setSelectedTag] = useState(tagTopics[0]?.label ?? "");
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [bodyDraft, setBodyDraft] = useState("");
@@ -682,21 +817,27 @@ function TagWorkspace(props: {
   const selectedRange = useRef<Range | null>(null);
 
   const relatedEpisodes = useMemo(
-    () =>
-      props.day.episodes.filter((episode) => {
-        const aliases =
-          tagClusters.find((cluster) => cluster.label === selectedTag)?.aliases ??
-          [selectedTag];
-        return (
-          !episode.isSensitive &&
-          aliases.some((alias) => episodeMatchesTag(episode, alias))
-        );
-      }),
-    [props.day.episodes, selectedTag, tagClusters],
+    () => {
+      const topic = tagTopics.find((item) => item.label === selectedTag);
+      if (!topic) return [];
+      const episodeIds = new Set(topic.episodeIds);
+      return dedupeRelatedEpisodes(
+        props.day.episodes.filter(
+          (episode) => !episode.isSensitive && episodeIds.has(episode.id),
+        ),
+      );
+    },
+    [props.day.episodes, selectedTag, tagTopics],
   );
   const generatedBody = useMemo(
     () => buildTagViewBody(selectedTag, relatedEpisodes),
     [relatedEpisodes, selectedTag],
+  );
+  const collectedContentCount = useMemo(
+    () =>
+      relatedEpisodes.filter((episode) => episodeContentScore(episode) > 0)
+        .length,
+    [relatedEpisodes],
   );
   const savedNote = selectedTag
     ? props.entry?.tagNotes?.[selectedTag]
@@ -707,9 +848,9 @@ function TagWorkspace(props: {
   const visibleFormat = savedNote?.format ?? DEFAULT_ENTRY_FORMAT;
 
   useEffect(() => {
-    if (!tagClusters.some((cluster) => cluster.label === selectedTag))
-      setSelectedTag(tagClusters[0]?.label ?? "");
-  }, [selectedTag, tagClusters]);
+    if (!tagTopics.some((topic) => topic.label === selectedTag))
+      setSelectedTag(tagTopics[0]?.label ?? "");
+  }, [selectedTag, tagTopics]);
 
   useEffect(() => {
     setIsEditing(false);
@@ -756,8 +897,8 @@ function TagWorkspace(props: {
   }
 
   async function hideTag(label: string): Promise<void> {
-    const cluster = tagClusters.find((item) => item.label === label);
-    const aliases = cluster?.aliases ?? [label];
+    const topic = tagTopics.find((item) => item.label === label);
+    const aliases = topic?.aliases ?? [label];
     await props.onSaveHiddenTags(props.day.dateKey, [
       ...props.day.hiddenTags,
       ...aliases,
@@ -767,11 +908,11 @@ function TagWorkspace(props: {
   return (
     <aside className="tag-workspace">
       <div className="tag-postits" aria-label="태그 포스트잇">
-        {tagClusters.length > 0 ? (
-          tagClusters.map((cluster, index) => (
+        {tagTopics.length > 0 ? (
+          tagTopics.map((topic, index) => (
             <div
-              key={cluster.label}
-              className={`tag-postit ${selectedTag === cluster.label ? "on" : ""}`}
+              key={topic.label}
+              className={`tag-postit ${selectedTag === topic.label ? "on" : ""}`}
               style={
                 {
                   "--postit-tilt": `${(index % 3) * 1.5 - 1.5}deg`,
@@ -781,19 +922,16 @@ function TagWorkspace(props: {
               <button
                 type="button"
                 className="tag-postit-select"
-                onClick={() => setSelectedTag(cluster.label)}
+                onClick={() => setSelectedTag(topic.label)}
               >
-                #{cluster.label}
-                {cluster.aliases.length > 1 && (
-                  <small>+{cluster.aliases.length - 1}</small>
-                )}
+                #{topic.label}
               </button>
               <button
                 type="button"
                 className="tag-postit-delete"
-                aria-label={`${cluster.label} 태그 숨기기`}
+                aria-label={`${topic.label} 태그 숨기기`}
                 title="이 태그 숨기기"
-                onClick={() => void hideTag(cluster.label)}
+                onClick={() => void hideTag(topic.label)}
               >
                 ×
               </button>
@@ -809,7 +947,10 @@ function TagWorkspace(props: {
           <div>
             <span className="tag-page-kicker">TAG VIEW</span>
             <h2>{selectedTag ? `#${selectedTag}` : "태그를 선택하세요"}</h2>
-            <p>{relatedEpisodes.length}개의 관련 수집 내용</p>
+            <p>
+              관련 페이지 {relatedEpisodes.length}개 · 내용 수집 완료{" "}
+              {collectedContentCount}개
+            </p>
           </div>
           {props.entry && selectedTag && !isEditing && (
             <button type="button" className="btn-edit" onClick={startEdit}>
@@ -884,9 +1025,15 @@ function TagWorkspace(props: {
               />
               <div className="tag-source-list">
                 {relatedEpisodes.slice(0, 8).map((episode) => (
-                  <span key={episode.id} title={episode.title}>
+                  <a
+                    key={episode.id}
+                    href={episode.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={episode.title}
+                  >
                     {episode.domain || episode.title}
-                  </span>
+                  </a>
                 ))}
               </div>
               {!props.entry && (
@@ -901,20 +1048,160 @@ function TagWorkspace(props: {
   );
 }
 
-function episodeMatchesTag(episode: DiaryEpisode, tag: string): boolean {
+type PrimaryTagTopic = {
+  label: string;
+  aliases: string[];
+  episodeIds: string[];
+};
+
+function buildPrimaryTagTopics(episodes: DiaryEpisode[]): PrimaryTagTopic[] {
+  const grouped = new Map<string, DiaryEpisode[]>();
+  for (const episode of episodes) {
+    if (episode.isSensitive) continue;
+    const key =
+      episode.groupKey ??
+      `fallback:${normalizeTag(episode.groupLabel) || canonicalEpisodeKey(episode)}`;
+    grouped.set(key, [...(grouped.get(key) ?? []), episode]);
+  }
+
+  const topics: PrimaryTagTopic[] = [];
+  for (const groupEpisodes of grouped.values()) {
+    const uniqueEpisodes = dedupeRelatedEpisodes(groupEpisodes);
+    const candidates = uniqueEpisodes.flatMap((episode) => [
+      ...episode.groupLabel.split(/[\s\p{P}\p{S}]+/u),
+      ...episode.keywords,
+    ]);
+    const clusters = clusterTags(candidates, 24);
+    if (clusters.length === 0) continue;
+    const primary = [...clusters].sort(
+      (left, right) =>
+        primaryTagScore(right.label, uniqueEpisodes) -
+        primaryTagScore(left.label, uniqueEpisodes),
+    )[0];
+    const aliases = [
+      ...new Set(clusters.flatMap((cluster) => cluster.aliases)),
+    ];
+    const topic: PrimaryTagTopic = {
+      label: primary.label,
+      aliases,
+      episodeIds: groupEpisodes.map((episode) => episode.id),
+    };
+
+    const contentKeys = new Set(
+      uniqueEpisodes.map(canonicalEpisodeKey).filter(Boolean),
+    );
+    const existing = topics.find(
+      (item) =>
+        normalizeTag(item.label) === normalizeTag(topic.label) ||
+        item.episodeIds.some((id) => {
+          const episode = episodes.find((candidate) => candidate.id === id);
+          return episode ? contentKeys.has(canonicalEpisodeKey(episode)) : false;
+        }),
+    );
+    if (existing) {
+      const mergedEpisodes = dedupeRelatedEpisodes(
+        episodes.filter((episode) =>
+          new Set([...existing.episodeIds, ...topic.episodeIds]).has(episode.id),
+        ),
+      );
+      const labels = [existing.label, topic.label];
+      existing.label = labels.sort(
+        (left, right) =>
+          primaryTagScore(right, mergedEpisodes) -
+          primaryTagScore(left, mergedEpisodes),
+      )[0];
+      existing.aliases = [...new Set([...existing.aliases, ...topic.aliases])];
+      existing.episodeIds = [
+        ...new Set([...existing.episodeIds, ...topic.episodeIds]),
+      ];
+      continue;
+    }
+    topics.push(topic);
+  }
+
+  return topics
+    .sort((left, right) => right.episodeIds.length - left.episodeIds.length)
+    .slice(0, 10);
+}
+
+function primaryTagScore(tag: string, episodes: DiaryEpisode[]): number {
   const needle = normalizeTag(tag);
-  if (!needle) return false;
-  const values = [
-    ...episode.keywords,
-    ...episode.tokens,
-    episode.groupLabel,
-    episode.title,
-    ...(episode.richContent?.facts ?? []).flatMap((fact) => [
-      fact.subject,
-      fact.detail,
-    ]),
-  ];
-  return values.some((value) => normalizeTag(value).includes(needle));
+  let score = Math.min(needle.length, 12) * 3;
+  if (/^(관광|여행|정보|추천|검색|결과|장소|내용)$/i.test(tag)) score -= 16;
+
+  for (const episode of episodes) {
+    const keywordIndex = episode.keywords.findIndex(
+      (keyword) => normalizeTag(keyword) === needle,
+    );
+    if (keywordIndex >= 0) score += Math.max(3, 12 - keywordIndex * 2);
+    if (normalizeTag(episode.groupLabel).includes(needle)) score += 6;
+    if (normalizeTag(episode.title).includes(needle)) score += 8;
+    if (
+      (episode.richContent?.facts ?? []).some((fact) =>
+        normalizeTag(fact.subject).includes(needle),
+      )
+    )
+      score += 7;
+  }
+  return score;
+}
+
+function dedupeRelatedEpisodes(episodes: DiaryEpisode[]): DiaryEpisode[] {
+  const byUrl = new Map<string, DiaryEpisode>();
+  for (const episode of episodes) {
+    const key = canonicalEpisodeKey(episode) || episode.id;
+    const current = byUrl.get(key);
+    if (!current || episodeContentScore(episode) > episodeContentScore(current))
+      byUrl.set(key, episode);
+  }
+
+  const byContent = new Map<string, DiaryEpisode>();
+  for (const episode of byUrl.values()) {
+    const fingerprint = episodeContentFingerprint(episode);
+    const key = fingerprint || canonicalEpisodeKey(episode) || episode.id;
+    const current = byContent.get(key);
+    if (!current || episodeContentScore(episode) > episodeContentScore(current))
+      byContent.set(key, episode);
+  }
+  return [...byContent.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function canonicalEpisodeKey(episode: DiaryEpisode): string {
+  try {
+    const url = new URL(episode.url);
+    url.hash = "";
+    [
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "utm_term",
+      "utm_content",
+      "fbclid",
+      "gclid",
+    ].forEach((key) => url.searchParams.delete(key));
+    url.searchParams.sort();
+    return url.toString();
+  } catch {
+    return episode.url;
+  }
+}
+
+function episodeContentFingerprint(episode: DiaryEpisode): string {
+  const rich = episode.richContent;
+  const value = [
+    ...(rich?.conversationInsights ?? []).slice(-2).map(
+      (insight) => `${insight.question} ${insight.answerSummary}`,
+    ),
+    ...(rich?.facts ?? []).slice(0, 5).map((fact) => fact.detail),
+    ...(rich?.sections ?? []).slice(0, 2).map((section) => section.text),
+    rich?.video?.description,
+    rich?.summary,
+    episode.snippet,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const fingerprint = normalizeTag(value).slice(0, 500);
+  return fingerprint.length >= 30 ? fingerprint : "";
 }
 
 function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
@@ -922,34 +1209,153 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
   if (episodes.length === 0)
     return `#${tag}와 직접 연결된 수집 내용을 아직 찾지 못했습니다.`;
 
-  const lines = [`#${tag} 관련 수집 내용`];
-  const seenFacts = new Set<string>();
-  for (const episode of episodes.slice(0, 10)) {
-    const facts = (episode.richContent?.facts ?? []).filter((fact) =>
-      isUsefulCollectedText(`${fact.subject} ${fact.detail}`),
+  const contentful = [...episodes]
+    .filter((episode) => episodeContentScore(episode) > 0)
+    .sort(
+      (left, right) =>
+        episodeContentScore(right) - episodeContentScore(left) ||
+        right.updatedAt - left.updatedAt,
     );
-    if (facts.length > 0) {
-      for (const fact of facts.slice(0, 5)) {
-        const key = `${fact.subject}|${fact.detail.slice(0, 120)}`;
-        if (seenFacts.has(key)) continue;
-        seenFacts.add(key);
-        lines.push(`• ${fact.subject}: ${fact.detail}`);
+  if (contentful.length === 0) {
+    return [
+      `#${tag} 관련 수집 내용`,
+      "관련 페이지는 찾았지만 본문을 아직 수집하지 못했습니다.",
+      "해당 페이지를 다시 열어 잠시 기다리면 본문이 갱신됩니다.",
+    ].join("\n\n");
+  }
+
+  const lines = [
+    `#${tag} 핵심 정보`,
+    `${contentful.length}개의 관련 페이지에서 핵심 내용을 정리했습니다.`,
+  ];
+  const seenDetails = new Set<string>();
+  const seenPages = new Set<string>();
+  for (const episode of contentful.slice(0, 8)) {
+    const pageKey = episodeContentFingerprint(episode);
+    if (pageKey && seenPages.has(pageKey)) continue;
+    if (pageKey) seenPages.add(pageKey);
+    const title = cleanCollectedText(episode.title || episode.domain);
+    const pageLines = [`[${pageTypeLabel(episode)}] ${title}`];
+    const conversationInsights = episode.richContent?.conversationInsights ?? [];
+    for (const insight of conversationInsights.slice(-3)) {
+      const insightKey = normalizeTag(
+        `${insight.question}:${insight.answerSummary.slice(0, 180)}`,
+      );
+      if (seenDetails.has(insightKey)) continue;
+      seenDetails.add(insightKey);
+      pageLines.push(`- 질문: ${cleanCollectedText(insight.question)}`);
+      pageLines.push(`- 핵심 답변: ${collectedExcerpt(insight.answerSummary, 700)}`);
+      if (insight.actionItems?.length) {
+        pageLines.push(
+          `- 실행 항목: ${insight.actionItems
+            .slice(0, 4)
+            .map((item) => collectedExcerpt(item, 260))
+            .join(" / ")}`,
+        );
       }
-      continue;
     }
-    const summary = episode.richContent?.summary ?? episode.snippet;
-    if (summary && isUsefulCollectedText(summary))
-      lines.push(`• ${episode.title || episode.domain}: ${summary}`);
+    const facts = [...(episode.richContent?.facts ?? [])]
+      .filter((fact) => cleanCollectedText(fact.detail).length >= 20)
+      .sort(
+        (left, right) =>
+          Number(factMatchesTag(right.subject, right.detail, tag)) -
+          Number(factMatchesTag(left.subject, left.detail, tag)),
+      );
+
+    for (const fact of facts.slice(0, 4)) {
+      const subject = cleanCollectedText(fact.subject);
+      const detail = cleanCollectedText(fact.detail);
+      const key = normalizeTag(`${subject}:${detail.slice(0, 160)}`);
+      if (!detail || seenDetails.has(key)) continue;
+      seenDetails.add(key);
+      pageLines.push(`- ${subject}: ${detail}`);
+    }
+
+    const video = episode.richContent?.video;
+    if (video?.description) {
+      const description = collectedExcerpt(video.description, 500);
+      const descriptionKey = normalizeTag(description);
+      if (description && !seenDetails.has(descriptionKey)) {
+        seenDetails.add(descriptionKey);
+        pageLines.push(`- 영상 요약: ${description}`);
+      }
+    }
+
+    if (pageLines.length === 1) {
+      const section = episode.richContent?.sections
+        ?.map((item) => ({
+          heading: cleanCollectedText(item.heading ?? ""),
+          text: collectedExcerpt(item.text, 500),
+        }))
+        .find((item) => item.text);
+      if (section) {
+        pageLines.push(
+          `- ${section.heading ? `${section.heading}: ` : ""}${section.text}`,
+        );
+      }
+    }
+
+    if (pageLines.length === 1) {
+      const summary = collectedExcerpt(
+        episode.richContent?.summary ??
+          episode.richContent?.bodyText ??
+          episode.snippet,
+        550,
+      );
+      if (summary) pageLines.push(`- 핵심 내용: ${summary}`);
+    }
+
+    if (pageLines.length > 1) {
+      pageLines.push(`출처: ${episode.domain || episode.url}`);
+      lines.push(pageLines.join("\n"));
+    }
   }
   return lines.join("\n\n");
 }
 
-function isUsefulCollectedText(value: string): boolean {
-  const text = value.replace(/\s+/g, " ").trim();
-  if (text.length < 20) return false;
-  return !/(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|쿠키|광고|협찬|copyright|sign\s?in|log\s?in|subscribe|follow|share|comment|privacy|cookie|sponsor)/i.test(
-    text,
+function episodeContentScore(episode: DiaryEpisode): number {
+  const rich = episode.richContent;
+  if (!rich) return episode.snippet.length;
+  return (
+    (rich.facts?.length ?? 0) * 1_000 +
+    (rich.conversationInsights?.length ?? 0) * 1_500 +
+    (rich.sections?.length ?? 0) * 500 +
+    (rich.video?.description?.length ?? 0) * 2 +
+    (rich.summary?.length ?? 0) +
+    Math.min(rich.bodyText?.length ?? 0, 2_000)
   );
+}
+
+function factMatchesTag(subject: string, detail: string, tag: string): boolean {
+  const needle = normalizeTag(tag);
+  return normalizeTag(`${subject} ${detail}`).includes(needle);
+}
+
+function pageTypeLabel(episode: DiaryEpisode): string {
+  if (episode.pageType === "video") return "영상";
+  if (episode.pageType === "documentation") return "문서";
+  if (episode.pageType === "search") return "검색 결과";
+  if (episode.pageType === "ai-chat") return "AI 대화";
+  return "페이지";
+}
+
+function collectedExcerpt(value: string | undefined, maxChars: number): string {
+  const cleaned = cleanCollectedText(value ?? "");
+  if (cleaned.length <= maxChars) return cleaned;
+  const chunk = cleaned.slice(0, maxChars);
+  const end = Math.max(chunk.lastIndexOf(". "), chunk.lastIndexOf("다. "));
+  return `${(end > maxChars * 0.5 ? chunk.slice(0, end + 1) : chunk).trim()}…`;
+}
+
+function cleanCollectedText(value: string): string {
+  const noise =
+    /^(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|쿠키|광고|협찬|copyright|sign\s?in|log\s?in|subscribe|follow|share|comment|privacy|cookie|sponsor)\b/i;
+  return value
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line.length >= 2 && !noise.test(line))
+    .join(" ")
+    .trim();
 }
 
 function RichBodyEditor(props: {
@@ -1583,6 +1989,25 @@ function RichContentPreview(props: {
           <span>{turn.text}</span>
         </div>
       ))}
+      {rich?.conversationInsights && rich.conversationInsights.length > 0 && (
+        <div className="rich-conversation-insights">
+          <div className="rich-facts-title">AI 대화 핵심 내용</div>
+          {rich.conversationInsights.slice(-3).map((insight, index) => (
+            <section key={`${insight.question}-${index}`}>
+              <b>질문</b>
+              <p>{insight.question}</p>
+              <b>핵심 답변</b>
+              <p>{insight.answerSummary}</p>
+              {insight.actionItems && insight.actionItems.length > 0 && (
+                <>
+                  <b>실행 항목</b>
+                  <p>{insight.actionItems.join(" · ")}</p>
+                </>
+              )}
+            </section>
+          ))}
+        </div>
+      )}
       {rich?.facts && rich.facts.length > 0 && (
         <div className="rich-facts">
           <div className="rich-facts-title">페이지에서 찾은 구체적 정보</div>

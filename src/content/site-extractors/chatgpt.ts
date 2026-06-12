@@ -1,16 +1,29 @@
 import type { ConversationTurn } from "@/shared/types";
 
 export function extractChatGPTTurns(): ConversationTurn[] {
-  return Array.from(document.querySelectorAll("[data-message-author-role]"))
+  const turns = Array.from(document.querySelectorAll("[data-message-author-role]"))
     .map((node) => ({
       role:
         node.getAttribute("data-message-author-role") === "user"
           ? ("user" as const)
           : ("assistant" as const),
-      text: (node as HTMLElement).innerText?.replace(/\s+/g, " ").trim() ?? "",
+      text: cleanConversationText((node as HTMLElement).innerText ?? ""),
     }))
     .filter((turn) => turn.text.length >= 4)
-    .slice(-8);
+  return dedupeTurns(turns).slice(-16);
+}
+
+function dedupeTurns(turns: ConversationTurn[]): ConversationTurn[] {
+  return turns.filter(
+    (turn, index) =>
+      index === 0 ||
+      turn.role !== turns[index - 1].role ||
+      turn.text !== turns[index - 1].text,
+  );
+}
+
+function cleanConversationText(value: string): string {
+  return value.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export function extractChatGPT(): string {
