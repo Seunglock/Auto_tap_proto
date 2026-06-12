@@ -2,6 +2,15 @@ import { extractCoreContent } from "./core-content";
 import { pickExtractor } from "./site-extractors";
 import { ContentChangeWatcher } from "./observers";
 import type { PageType, ExtractedContent } from "@/shared/types";
+import { extractChatGPTTurns } from "./site-extractors/chatgpt";
+import { extractClaudeTurns } from "./site-extractors/claude";
+import { extractGeminiTurns } from "./site-extractors/gemini";
+import { extractVideoContent } from "./site-extractors/video";
+import {
+  extractFactualContent,
+  extractFactsFromText,
+  summarizeFacts,
+} from "./factual-content";
 import type {
   ExtractRequest,
   ExtractResponse,
@@ -12,6 +21,10 @@ import {
   isSearchEngineHost,
   isAiChatHost,
 } from "@/shared/site-detection";
+import {
+  extractConversationInsights,
+  summarizeConversationInsights,
+} from "./conversation-insights";
 
 function buildExtracted(): ExtractedContent {
   const host = location.hostname;
@@ -28,34 +41,137 @@ function buildExtracted(): ExtractedContent {
     const extractor = pickExtractor();
     const snippet = safeRun(extractor);
     const pageType: PageType = aiChat ? "ai-chat" : "search";
+    const conversationTurns = aiChat ? extractConversationTurns(host) : [];
+    const conversationInsights = aiChat
+      ? extractConversationInsights(conversationTurns)
+      : [];
+    const conversationSummary = summarizeConversationInsights(
+      conversationInsights,
+    );
+    const bodyText =
+      conversationTurns.length > 0
+        ? formatConversationBody(conversationTurns)
+        : snippet.slice(0, 16_000);
+    const facts = extractFactsFromText(bodyText, title).slice(0, 20);
+    const factSummary = summarizeFacts(facts);
+    const factualSnippet = joinDistinct([
+      conversationSummary,
+      factSummary,
+      snippet,
+    ]).slice(0, 2_400);
     return {
       title,
       url: location.href,
-      contentSnippet: snippet,
+      contentSnippet: factualSnippet,
       headings: [],
       pageType,
       extractionSource: "site-extractor",
       extractionConfidence: snippet.length > 100 ? 0.85 : 0.5,
+      richContent: {
+        summary: (conversationSummary || factSummary || snippet).slice(0, 1_800),
+        bodyText,
+        facts: facts.length > 0 ? facts : undefined,
+        conversationTurns:
+          conversationTurns.length > 0 ? conversationTurns : undefined,
+        conversationInsights:
+          conversationInsights.length > 0 ? conversationInsights : undefined,
+      },
     };
   }
 
   // Generic page: use core-content for structured extraction
   const core = safeRunCoreContent();
   const pageType = detectPageType(host, location.pathname);
+  const video = pageType === "video" ? extractVideoContent() : undefined;
+  const description = extractMetaDescription();
+  const facts =
+    pageType === "video"
+      ? extractFactsFromText(video?.description ?? "", title).slice(0, 12)
+      : extractFactualContent(core, title);
+  const factSummary = summarizeFacts(facts);
 
-  // Fall back to old extractor if core produced nothing
-  const snippet = core.text.length > 0 ? core.text : safeRun(pickExtractor());
+  const videoSnippet = video
+    ? [video.videoTitle, video.channel, video.description]
+        .filter(Boolean)
+        .join(" | ")
+    : "";
+  const snippet =
+    videoSnippet || joinDistinct([factSummary, core.text, description]);
+  const fallbackSnippet = snippet || safeRun(pickExtractor());
+  const bodyText =
+    pageType === "video"
+      ? video?.description ?? fallbackSnippet
+      : core.bodyText || fallbackSnippet;
 
   return {
     title,
     url: location.href,
-    contentSnippet: snippet.slice(0, 900),
+    contentSnippet: fallbackSnippet.slice(0, 1_800),
     headings: core.headings,
     pageType,
     extractionSource:
       core.confidence >= 0.55 ? "core-content" : "metadata-only",
     extractionConfidence: core.confidence,
+    richContent: {
+      summary: (factSummary || fallbackSnippet).slice(0, 1_800),
+      bodyText: bodyText.slice(0, 16_000),
+      sections:
+        pageType !== "video" && core.sections.length > 0
+          ? core.sections
+          : undefined,
+      facts: facts.length > 0 ? facts : undefined,
+      codeBlocks:
+        pageType !== "video" && core.codeBlocks.length > 0
+          ? core.codeBlocks
+          : undefined,
+      video,
+    },
   };
+}
+
+function extractConversationTurns(host: string) {
+  if (host === "claude.ai" || host.endsWith(".claude.ai"))
+    return extractClaudeTurns();
+  if (host === "gemini.google.com" || host === "bard.google.com")
+    return extractGeminiTurns();
+  return extractChatGPTTurns();
+}
+
+function formatConversationBody(
+  turns: Array<{ role: "user" | "assistant"; text: string }>,
+): string {
+  return turns
+    .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.text}`)
+    .join("\n\n")
+    .slice(0, 16_000);
+}
+
+function extractMetaDescription(): string {
+  const selectors = [
+    'meta[name="description"]',
+    'meta[property="og:description"]',
+    'meta[name="twitter:description"]',
+  ];
+  for (const selector of selectors) {
+    const value = (document.querySelector(selector) as HTMLMetaElement | null)
+      ?.content?.replace(/\s+/g, " ")
+      .trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function joinDistinct(parts: string[]): string {
+  const seen = new Set<string>();
+  return parts
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .filter((part) => {
+      const key = part.toLowerCase().slice(0, 160);
+      if (!part || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(" | ");
 }
 
 function safeRun(fn: () => string): string {
@@ -72,7 +188,15 @@ function safeRunCoreContent(): import("./core-content").CoreContentResult {
     return extractCoreContent();
   } catch (err) {
     console.warn("[auto-tab-group] core-content extraction failed", err);
-    return { text: "", headings: [], confidence: 0, source: "fallback" };
+    return {
+      text: "",
+      bodyText: "",
+      headings: [],
+      sections: [],
+      codeBlocks: [],
+      confidence: 0,
+      source: "fallback",
+    };
   }
 }
 

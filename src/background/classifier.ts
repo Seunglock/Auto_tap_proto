@@ -3,7 +3,6 @@ import {
   makeGroupKey,
   pickColor,
   recomputeCentroid,
-  updateCentroid,
 } from "./clustering";
 import { computeLabel, tokenize } from "./labeling";
 import { scoreGroups } from "./scoring";
@@ -25,11 +24,13 @@ import type {
   ExtractedContent,
   GroupDocument,
   GroupRecord,
+  RichContent,
   Settings,
   TabState,
 } from "@/shared/types";
 import { MIN_CONTENT_TOKENS } from "@/shared/constants";
 import { isSearchEngineUrl } from "@/shared/site-detection";
+import { mergeRichContent } from "@/shared/rich-content";
 
 const MIN_SEARCH_SNIPPET_CHARS = 80;
 const GROUP_MERGE_MIN_SEMANTIC = 0.85;
@@ -68,13 +69,18 @@ export async function classifyTab(
 
   // Skip if content hash unchanged (avoids redundant embedding)
   const tabState = await getTabState(tab.id);
-  const newHash = hashString(passageText);
+  const newHash = contentStateHash(passageText, content);
   if (
     !options.force &&
     options.reason !== "url-change" &&
     tabState?.lastEmbeddingHash === newHash &&
     tabState?.groupKey
   ) {
+    const currentGroup = (await getAllGroups())[tabState.groupKey];
+    if (currentGroup) {
+      await refreshDocumentContent(currentGroup, tab.id, tokens, content);
+      await safeRecordDiaryEpisode(tab.id, currentGroup, content, tokens);
+    }
     return { kind: "skipped", reason: "no-content-change" };
   }
 
@@ -332,9 +338,6 @@ async function applyDocumentToGroup(
   content: ExtractedContent,
   settings: { maxDocsPerGroup: number },
 ): Promise<void> {
-  group.centroid = updateCentroid(group.centroid, group.docCount, embedding);
-  group.docCount += 1;
-
   const domain = extractDomainFromUrl(content.url);
   const newDoc: GroupDocument = {
     tabId,
@@ -342,6 +345,9 @@ async function applyDocumentToGroup(
     url: content.url ?? "",
     domain,
     snippet: (content.contentSnippet ?? "").slice(0, 300),
+    pageType: content.pageType,
+    headings: content.headings?.slice(0, 8),
+    richContent: compactRichContent(content.richContent),
     tokens,
     embedding: embedding.slice(),
     collectedAt: Date.now(),
@@ -358,9 +364,10 @@ async function applyDocumentToGroup(
     }
   }
 
-  if (domain) {
-    group.domains[domain] = (group.domains[domain] ?? 0) + 1;
-  }
+  const centroid = recomputeCentroid(group.documents);
+  if (centroid) group.centroid = centroid;
+  group.docCount = group.documents.length;
+  group.domains = countDocumentDomains(group.documents);
   group.lastActiveAt = Date.now();
   group.updatedAt = Date.now();
 
@@ -582,6 +589,9 @@ async function createNewGroup(
         url: content.url ?? "",
         domain,
         snippet: (content.contentSnippet ?? "").slice(0, 300),
+        pageType: content.pageType,
+        headings: content.headings?.slice(0, 8),
+        richContent: compactRichContent(content.richContent),
         tokens,
         embedding: embedding.slice(),
         collectedAt: Date.now(),
@@ -615,6 +625,115 @@ async function createNewGroup(
   }
 
   return tempGroup;
+}
+
+function countDocumentDomains(
+  documents: GroupDocument[],
+): Record<string, number> {
+  const domains: Record<string, number> = {};
+  for (const document of documents) {
+    if (!document.domain) continue;
+    domains[document.domain] = (domains[document.domain] ?? 0) + 1;
+  }
+  return domains;
+}
+
+async function refreshDocumentContent(
+  group: GroupRecord,
+  tabId: number,
+  tokens: string[],
+  content: ExtractedContent,
+): Promise<void> {
+  const document = group.documents.find((item) => item.tabId === tabId);
+  if (!document) return;
+  document.title = content.title || document.title;
+  document.url = content.url || document.url;
+  document.domain = extractDomainFromUrl(content.url) || document.domain;
+  document.snippet = preferLonger(document.snippet, content.contentSnippet, 300);
+  document.pageType = content.pageType ?? document.pageType;
+  document.headings =
+    content.headings && content.headings.length > 0
+      ? content.headings.slice(0, 8)
+      : document.headings;
+  document.richContent = preferRichContent(
+    document.richContent,
+    compactRichContent(content.richContent),
+  );
+  document.tokens = tokens.length > 0 ? tokens : document.tokens;
+  document.updatedAt = Date.now();
+  group.domains = countDocumentDomains(group.documents);
+  group.updatedAt = Date.now();
+  await saveGroup(group);
+}
+
+function compactRichContent(content?: RichContent): RichContent | undefined {
+  if (!content) return undefined;
+  return {
+    summary: content.summary?.slice(0, 1_200),
+    bodyText: content.bodyText?.slice(0, 6_000),
+    sections: content.sections?.slice(0, 5).map((section) => ({
+      heading: section.heading?.slice(0, 200),
+      text: section.text.slice(0, 1_200),
+    })),
+    facts: content.facts?.slice(0, 20).map((fact) => ({
+      subject: fact.subject.slice(0, 160),
+      detail: fact.detail.slice(0, 900),
+      kind: fact.kind,
+      source: fact.source,
+    })),
+    conversationTurns: content.conversationTurns?.slice(-6).map((turn) => ({
+      role: turn.role,
+      text: turn.text.slice(0, 2_000),
+    })),
+    conversationInsights: content.conversationInsights?.slice(-6).map(
+      (insight) => ({
+        question: insight.question.slice(0, 500),
+        answerSummary: insight.answerSummary.slice(0, 1_200),
+        keyPoints: insight.keyPoints.slice(0, 5).map((point) => point.slice(0, 600)),
+        actionItems: insight.actionItems
+          ?.slice(0, 5)
+          .map((item) => item.slice(0, 600)),
+      }),
+    ),
+    codeBlocks: content.codeBlocks?.slice(0, 3).map((block) => ({
+      language: block.language,
+      code: block.code.slice(0, 1_500),
+    })),
+    video: content.video,
+  };
+}
+
+function preferRichContent(
+  existing?: RichContent,
+  incoming?: RichContent,
+): RichContent | undefined {
+  return mergeRichContent(existing, incoming);
+}
+
+function preferLonger(
+  existing: string,
+  incoming: string | undefined,
+  maxChars: number,
+): string {
+  const next = incoming?.trim() ?? "";
+  return (next.length >= existing.length ? next : existing).slice(0, maxChars);
+}
+
+function contentStateHash(passageText: string, content: ExtractedContent): string {
+  const rich = content.richContent;
+  const details = [
+    rich?.summary,
+    rich?.bodyText?.slice(0, 2_000),
+    ...(rich?.facts ?? []).slice(0, 8).map((fact) => `${fact.subject}:${fact.detail}`),
+    ...(rich?.sections ?? []).slice(0, 4).map((section) => `${section.heading}:${section.text}`),
+    ...(rich?.conversationInsights ?? [])
+      .slice(-4)
+      .map((insight) => `${insight.question}:${insight.answerSummary}`),
+    rich?.video?.description,
+  ]
+    .filter(Boolean)
+    .join("|");
+  return hashString(`${passageText}|${details}`);
 }
 
 async function joinChromeGroup(
@@ -689,7 +808,7 @@ async function persistTabState(
     tabId,
     groupKey,
     lastUrl: content.url ?? "",
-    lastEmbeddingHash: hashString(passageText),
+    lastEmbeddingHash: contentStateHash(passageText, content),
     pendingReclassify: isShortContent,
     lastClassifiedAt: Date.now(),
     firstSeenAt: existing?.firstSeenAt ?? Date.now(),
@@ -709,7 +828,7 @@ async function markPendingReclassify(
     tabId,
     groupKey: existing?.groupKey ?? null,
     lastUrl: existing?.lastUrl ?? content.url ?? "",
-    lastEmbeddingHash: hashString(passageText),
+    lastEmbeddingHash: contentStateHash(passageText, content),
     pendingReclassify: true,
     lastClassifiedAt: Date.now(),
     firstSeenAt: existing?.firstSeenAt ?? Date.now(),

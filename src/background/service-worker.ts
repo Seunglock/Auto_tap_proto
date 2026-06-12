@@ -24,6 +24,8 @@ import {
   getDiarySettings,
   getDiaryWeek,
   updateDiarySettings,
+  saveDiaryEntry,
+  updateDiaryHiddenTags,
 } from "./diary";
 import type {
   AnyMessage,
@@ -36,6 +38,8 @@ import type {
   GetGroupsResponse,
   GetSettingsResponse,
   GetSummaryResponse,
+  SaveDiaryEntryResponse,
+  UpdateDiaryHiddenTagsResponse,
 } from "@/shared/messages";
 import type { ClassificationOptions, TabState } from "@/shared/types";
 
@@ -257,9 +261,10 @@ async function runClassification(
 
   if (!settings.enabled) return;
 
-  // For URL changes on already-grouped tabs: bypass the "already-grouped" filter.
-  // For all other cases: apply the normal filter.
-  if (!isUrlChange && !shouldClassify(tab)) return;
+  // Auto-managed grouped tabs still need extraction on reload so their
+  // collected page content stays fresh. Other manually grouped tabs remain
+  // outside this extension's scope.
+  if (!isUrlChange && !shouldClassify(tab) && !tabState?.groupKey) return;
 
   // If this is a URL change but the URL ended up being the same, just clear dirty.
   if (isUrlChange && tabState?.lastUrl === tab.url) {
@@ -410,6 +415,25 @@ async function handleMessage(
     case "UPDATE_DIARY_SETTINGS": {
       const settings = await updateDiarySettings(message.settings);
       return { ok: true, settings };
+    }
+    case "SAVE_DIARY_ENTRY": {
+      const entry = await saveDiaryEntry(message.dateKey, message.patch);
+      const response: SaveDiaryEntryResponse = {
+        type: "SAVE_DIARY_ENTRY_RESULT",
+        entry,
+      };
+      return response;
+    }
+    case "UPDATE_DIARY_HIDDEN_TAGS": {
+      const hiddenTags = await updateDiaryHiddenTags(
+        message.dateKey,
+        message.hiddenTags,
+      );
+      const response: UpdateDiaryHiddenTagsResponse = {
+        type: "UPDATE_DIARY_HIDDEN_TAGS_RESULT",
+        hiddenTags,
+      };
+      return response;
     }
     case "UPDATE_SETTINGS": {
       const settings = await updateSettings(message.settings);
