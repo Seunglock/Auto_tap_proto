@@ -801,8 +801,8 @@ function TagWorkspace(props: {
   const tagTopics = useMemo(
     () => {
       const hidden = new Set(props.day.hiddenTags.map(normalizeTag));
-      return buildPrimaryTagTopics(props.day.episodes).filter((topic) =>
-        topic.aliases.every((tag) => !hidden.has(normalizeTag(tag))),
+      return buildPrimaryTagTopics(props.day.episodes).filter(
+        (topic) => !hidden.has(normalizeTag(topic.label)),
       );
     },
     [props.day],
@@ -897,11 +897,9 @@ function TagWorkspace(props: {
   }
 
   async function hideTag(label: string): Promise<void> {
-    const topic = tagTopics.find((item) => item.label === label);
-    const aliases = topic?.aliases ?? [label];
     await props.onSaveHiddenTags(props.day.dateKey, [
       ...props.day.hiddenTags,
-      ...aliases,
+      label,
     ]);
   }
 
@@ -1070,6 +1068,13 @@ function buildPrimaryTagTopics(episodes: DiaryEpisode[]): PrimaryTagTopic[] {
     const candidates = uniqueEpisodes.flatMap((episode) => [
       ...episode.groupLabel.split(/[\s\p{P}\p{S}]+/u),
       ...episode.keywords,
+      ...episode.title.split(/[\s\p{P}\p{S}]+/u),
+      ...(episode.headings ?? []).flatMap((heading) =>
+        heading.split(/[\s\p{P}\p{S}]+/u),
+      ),
+      ...(episode.richContent?.facts ?? []).flatMap((fact) =>
+        fact.subject.split(/[\s\p{P}\p{S}]+/u),
+      ),
     ]);
     const clusters = clusterTags(candidates, 24);
     if (clusters.length === 0) continue;
