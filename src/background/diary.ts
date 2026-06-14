@@ -2,6 +2,8 @@ import { hashString } from "./embedder";
 import { tokenize } from "./labeling";
 import { getAllGroups, getTabState } from "./storage";
 import { isInternalUrl, isLocalHost } from "./tab-filters";
+import { filterUsefulTags } from "@/shared/tag-utils";
+import { mergeRichContent, richContentScore } from "@/shared/rich-content";
 import type {
   DiaryAnalysis,
   DiaryCategoryKey,
@@ -20,6 +22,7 @@ import type {
 const DIARY_KEYS = {
   episodes: "diaryEpisodes",
   entries: "diaryEntries",
+  hiddenTags: "diaryHiddenTags",
   settings: "diarySettings",
 } as const;
 
@@ -76,11 +79,25 @@ const CATEGORY_META: Record<
   news: {
     label: "뉴스 · 정보",
     keywords: ["news", "article", "newsletter", "reddit", "뉴스", "아티클"],
-    domains: ["news.", "techcrunch.com", "verge.com", "tldr.tech", "reddit.com"],
+    domains: [
+      "news.",
+      "techcrunch.com",
+      "verge.com",
+      "tldr.tech",
+      "reddit.com",
+    ],
   },
   life: {
     label: "요리 · 라이프",
-    keywords: ["cook", "food", "recipe", "shopping", "요리", "레시피", "장보기"],
+    keywords: [
+      "cook",
+      "food",
+      "recipe",
+      "shopping",
+      "요리",
+      "레시피",
+      "장보기",
+    ],
     domains: ["kurly.com", "10000recipe.com", "instagram.com"],
   },
   sens: {
@@ -163,6 +180,7 @@ export async function recordDiaryEpisodeFromClassification(
     input.content.title,
     input.content.url,
     input.content.contentSnippet,
+    input.content.richContent?.bodyText?.slice(0, 4_000),
     input.group.label,
     groupKeywords.join(" "),
   ].join(" ");
@@ -170,12 +188,7 @@ export async function recordDiaryEpisodeFromClassification(
   const categoryKey = isSensitive
     ? "sens"
     : detectCategory(text, domain, input.group.label);
-  const id = await resolveClassifiedEpisodeId(
-    episodes,
-    input.tabId,
-    url,
-    now,
-  );
+  const id = await resolveClassifiedEpisodeId(episodes, input.tabId, url, now);
 
   const episode: DiaryEpisode = {
     id,
@@ -187,6 +200,9 @@ export async function recordDiaryEpisodeFromClassification(
     url,
     domain,
     snippet: (input.content.contentSnippet ?? "").slice(0, 300),
+    richContent: input.content.richContent,
+    pageType: input.content.pageType,
+    headings: input.content.headings?.slice(0, 5),
     groupKey: input.group.groupKey,
     groupLabel: input.group.label || "기타",
     keywords: groupKeywords,
@@ -246,6 +262,9 @@ export async function backfillHistory(days?: number): Promise<number> {
         url: item.url,
         domain,
         snippet: "",
+        richContent: undefined,
+        pageType: undefined,
+        headings: undefined,
         groupKey: match.groupKey,
         groupLabel: match.groupLabel,
         keywords: match.keywords,
@@ -266,15 +285,80 @@ export async function backfillHistory(days?: number): Promise<number> {
 
 export async function getDiaryDay(date?: string): Promise<DiaryDay> {
   const target = date ?? dateKey(Date.now());
-  const [episodes, entries] = await Promise.all([
+  const [episodes, entries, hiddenTags, groups] = await Promise.all([
     getAllDiaryEpisodes(),
     getAllDiaryEntries(),
+    getAllDiaryHiddenTags(),
+    getAllGroups(),
   ]);
-  const dayEpisodes = Object.values(episodes)
+  const dayEpisodes = enrichEpisodesFromGroups(
+    Object.values(episodes)
     .filter((episode) => episode.dateKey === target)
-    .sort((a, b) => a.startedAt - b.startedAt);
+      .sort((a, b) => a.startedAt - b.startedAt),
+    groups,
+  );
 
-  return buildDiaryDay(target, dayEpisodes, entries[target] ?? null);
+  return buildDiaryDay(
+    target,
+    dayEpisodes,
+    entries[target] ?? null,
+    hiddenTags[target] ?? [],
+  );
+}
+
+function enrichEpisodesFromGroups(
+  episodes: DiaryEpisode[],
+  groups: Record<string, GroupRecord>,
+): DiaryEpisode[] {
+  const documentsByUrl = new Map<
+    string,
+    { document: GroupRecord["documents"][number]; group: GroupRecord }
+  >();
+  for (const group of Object.values(groups)) {
+    for (const document of group.documents) {
+      if (!document.url) continue;
+      const current = documentsByUrl.get(document.url);
+      if (
+        !current ||
+        richContentScore(document.richContent) >
+          richContentScore(current.document.richContent)
+      ) {
+        documentsByUrl.set(document.url, { document, group });
+      }
+    }
+  }
+
+  return episodes.map((episode) => {
+    const match = documentsByUrl.get(episode.url);
+    if (!match) return episode;
+    return {
+      ...episode,
+      snippet: preferLongerText(
+        episode.snippet,
+        match.document.snippet,
+        1_800,
+      ),
+      richContent: mergeRichContent(
+        episode.richContent,
+        match.document.richContent,
+      ),
+      pageType: episode.pageType ?? match.document.pageType,
+      headings:
+        episode.headings && episode.headings.length > 0
+          ? episode.headings
+          : match.document.headings,
+      groupKey: episode.groupKey ?? match.group.groupKey,
+      groupLabel: episode.groupLabel || match.group.label,
+      keywords: unique([
+        ...episode.keywords,
+        ...topKeywordsForGroup(match.group, match.document.tokens),
+      ]).slice(0, 12),
+      tokens: unique([...episode.tokens, ...match.document.tokens]).slice(
+        0,
+        30,
+      ),
+    };
+  });
 }
 
 export async function getDiaryWeek(date?: string): Promise<DiaryWeek> {
@@ -287,8 +371,10 @@ export async function getDiaryWeek(date?: string): Promise<DiaryWeek> {
   for (let offset = 0; offset < 7; offset += 1) {
     const current = addDays(start, offset);
     const currentKey = dateKey(current.getTime());
-    const dayEpisodes = episodes.filter((episode) => episode.dateKey === currentKey);
-    const day = buildDiaryDay(currentKey, dayEpisodes, null);
+    const dayEpisodes = episodes.filter(
+      (episode) => episode.dateKey === currentKey,
+    );
+    const day = buildDiaryDay(currentKey, dayEpisodes, null, []);
     days.push({
       dateKey: currentKey,
       label: formatDayLabel(current),
@@ -310,14 +396,16 @@ export async function getDiaryAnalysis(date?: string): Promise<DiaryAnalysis> {
   const week = await getDiaryWeek(target);
   const episodes = Object.values(await getAllDiaryEpisodes()).filter(
     (episode) =>
-      episode.dateKey >= week.startDateKey && episode.dateKey <= week.endDateKey,
+      episode.dateKey >= week.startDateKey &&
+      episode.dateKey <= week.endDateKey,
   );
   const safeEpisodes = episodes.filter((episode) => !episode.isSensitive);
-  const topKeywords = frequency(
-    safeEpisodes.flatMap((episode) => episode.keywords),
-  )
-    .slice(0, 20)
-    .map(([keyword, count]) => ({ keyword, count }));
+  const keywordCounts = new Map(
+    frequency(safeEpisodes.flatMap((episode) => episode.keywords)),
+  );
+  const topKeywords = filterUsefulTags([...keywordCounts.keys()], 20).map(
+    (keyword) => ({ keyword, count: keywordCounts.get(keyword) ?? 1 }),
+  );
   const topGroups = groupSummaries(safeEpisodes).slice(0, 6);
 
   return {
@@ -347,6 +435,7 @@ export async function generateDiaryEntry(date?: string): Promise<DiaryEntry> {
     tags: fallback.tags,
     sourceEpisodeIds: safeEpisodes.map((episode) => episode.id),
     createdAt: day.entry?.createdAt ?? now,
+    tagNotes: day.entry?.tagNotes,
     updatedAt: now,
   };
   const entries = await getAllDiaryEntries();
@@ -364,12 +453,35 @@ async function upsertDiaryEpisode(episode: DiaryEpisode): Promise<void> {
   episodes[episode.id] = existing
     ? {
         ...episode,
+        snippet: preferLongerText(existing.snippet, episode.snippet, 1_800),
+        richContent: mergeRichContent(existing.richContent, episode.richContent),
+        pageType: episode.pageType ?? existing.pageType,
+        headings:
+          episode.headings && episode.headings.length > 0
+            ? episode.headings
+            : existing.headings,
+        keywords: unique([...existing.keywords, ...episode.keywords]).slice(
+          0,
+          12,
+        ),
+        tokens: unique([...existing.tokens, ...episode.tokens]).slice(0, 30),
         createdAt: existing.createdAt,
         dateKey: dateKey(startedAt),
         startedAt,
       }
     : episode;
   await chrome.storage.local.set({ [DIARY_KEYS.episodes]: episodes });
+}
+
+function preferLongerText(
+  existing: string,
+  incoming: string,
+  maxChars: number,
+): string {
+  return (incoming.length >= existing.length ? incoming : existing).slice(
+    0,
+    maxChars,
+  );
 }
 
 async function resolveClassifiedEpisodeId(
@@ -414,19 +526,40 @@ async function getAllDiaryEntries(): Promise<Record<string, DiaryEntry>> {
   return (result[DIARY_KEYS.entries] as Record<string, DiaryEntry>) ?? {};
 }
 
+async function getAllDiaryHiddenTags(): Promise<Record<string, string[]>> {
+  const result = await chrome.storage.local.get(DIARY_KEYS.hiddenTags);
+  return (result[DIARY_KEYS.hiddenTags] as Record<string, string[]>) ?? {};
+}
+
+export async function updateDiaryHiddenTags(
+  dateKey: string,
+  hiddenTags: string[],
+): Promise<string[]> {
+  const allHiddenTags = await getAllDiaryHiddenTags();
+  const next = [...new Set(hiddenTags.filter(Boolean))];
+  allHiddenTags[dateKey] = next;
+  await chrome.storage.local.set({ [DIARY_KEYS.hiddenTags]: allHiddenTags });
+  return next;
+}
+
 function buildDiaryDay(
   target: string,
   episodes: DiaryEpisode[],
   entry: DiaryEntry | null,
+  hiddenTags: string[],
 ): DiaryDay {
   const sorted = [...episodes].sort((a, b) => a.startedAt - b.startedAt);
   const safeEpisodes = sorted.filter((episode) => !episode.isSensitive);
   return {
     dateKey: target,
     episodes: sorted,
-    topKeywords: frequency(safeEpisodes.flatMap((episode) => episode.keywords))
-      .slice(0, 10)
-      .map(([keyword]) => keyword),
+    topKeywords: filterUsefulTags(
+      frequency(safeEpisodes.flatMap((episode) => episode.keywords)).map(
+        ([keyword]) => keyword,
+      ),
+      10,
+    ),
+    hiddenTags,
     topGroups: groupSummaries(safeEpisodes).slice(0, 6),
     topDomains: frequency(
       safeEpisodes.map((episode) => episode.domain).filter(Boolean),
@@ -439,7 +572,10 @@ function buildDiaryDay(
 }
 
 function statsForEpisodes(episodes: DiaryEpisode[]): DiaryStats {
-  const totalMs = episodes.reduce((sum, episode) => sum + episode.durationMs, 0);
+  const totalMs = episodes.reduce(
+    (sum, episode) => sum + episode.durationMs,
+    0,
+  );
   return {
     totalEpisodes: episodes.length,
     safeEpisodes: episodes.filter((episode) => !episode.isSensitive).length,
@@ -490,7 +626,9 @@ function matchHistoryToGroup(
 
   for (const group of Object.values(groups)) {
     const keywords = topKeywordsForGroup(group, []);
-    const candidates = new Set(tokenize(`${group.label} ${keywords.join(" ")}`));
+    const candidates = new Set(
+      tokenize(`${group.label} ${keywords.join(" ")}`),
+    );
     let score = 0;
     for (const token of textTokens) {
       if (candidates.has(token)) score += 1;
@@ -507,18 +645,24 @@ function matchHistoryToGroup(
     }
   }
 
-  return best.score > 0 ? best : { ...best, keywords: unique(tokens).slice(0, 5) };
+  return best.score > 0
+    ? best
+    : { ...best, keywords: unique(tokens).slice(0, 5) };
 }
 
-function topKeywordsForGroup(group: GroupRecord, extraTokens: string[]): string[] {
+function topKeywordsForGroup(
+  group: GroupRecord,
+  extraTokens: string[],
+): string[] {
   const tokens = [
     ...tokenize(group.label),
     ...group.documents.flatMap((doc) => doc.tokens),
     ...extraTokens,
   ];
-  return frequency(tokens)
-    .slice(0, 6)
-    .map(([keyword]) => keyword);
+  return filterUsefulTags(
+    frequency(tokens).map(([keyword]) => keyword),
+    6,
+  );
 }
 
 function detectSensitive(text: string): boolean {
@@ -536,30 +680,52 @@ function detectCategory(
 ): DiaryCategoryKey {
   const lower = `${text} ${domain} ${groupLabel}`.toLowerCase();
   const candidates: DiaryCategoryKey[] = ["dev", "ent", "news", "life"];
-  let best: { key: DiaryCategoryKey; score: number } = { key: "news", score: 0 };
+  let best: { key: DiaryCategoryKey; score: number } = {
+    key: "news",
+    score: 0,
+  };
 
   for (const key of candidates) {
     const meta = CATEGORY_META[key];
     const score =
       meta.keywords.filter((keyword) => lower.includes(keyword)).length +
-      meta.domains.filter((domainPattern) => lower.includes(domainPattern)).length * 2;
+      meta.domains.filter((domainPattern) => lower.includes(domainPattern))
+        .length *
+        2;
     if (score > best.score) best = { key, score };
   }
 
   return best.score > 0 ? best.key : "news";
 }
 
-function buildRuleBasedEntry(day: DiaryDay): Pick<DiaryEntry, "summary" | "body" | "tags"> {
+function buildRuleBasedEntry(
+  day: DiaryDay,
+): Pick<DiaryEntry, "summary" | "body" | "tags"> {
   const topGroups = day.topGroups.slice(0, 3);
   const topKeywords = day.topKeywords.slice(0, 5);
+  const concreteFacts = collectConcreteFacts(day).slice(0, 6);
   const main = topGroups[0]?.label ?? topKeywords[0] ?? "디지털 기록";
   const secondary = topGroups[1]?.label;
-  const summary = secondary
-    ? `"${main}에서 시작해,\n${secondary}까지 이어진 하루."`
-    : `"${main} 쪽으로\n조용히 기울어진 하루."`;
-  const domains = day.topDomains.slice(0, 3).map((d) => d.domain).join(", ");
+  const summary =
+    concreteFacts.length > 0
+      ? `"${concreteFacts[0].subject}"에 관한 구체적인 정보를 확인한 날.`
+      : secondary
+        ? `"${main}에서 시작해,\n${secondary}까지 이어진 하루."`
+        : `"${main} 쪽으로\n조용히 기울어진 하루."`;
+  const domains = day.topDomains
+    .slice(0, 3)
+    .map((d) => d.domain)
+    .join(", ");
   const bodyParts = [
     `${formatKoreanDate(day.dateKey)}에는 ${main} 관련 기록이 가장 많이 남았어요.`,
+    concreteFacts.length > 0
+      ? [
+          "오늘 확인한 구체적 내용:",
+          ...concreteFacts.map(
+            (fact) => `- ${fact.subject}: ${fact.detail.slice(0, 240)}`,
+          ),
+        ].join("\n")
+      : "",
     secondary
       ? `중간중간 ${secondary} 흐름도 이어져서, 관심사가 한 방향에만 머물지는 않았습니다.`
       : "크게 흩어지기보다 비슷한 주제 안에서 탐색이 이어졌습니다.",
@@ -577,6 +743,34 @@ function buildRuleBasedEntry(day: DiaryDay): Pick<DiaryEntry, "summary" | "body"
   };
 }
 
+function collectConcreteFacts(
+  day: DiaryDay,
+): Array<{ subject: string; detail: string }> {
+  const seen = new Set<string>();
+  const facts: Array<{ subject: string; detail: string }> = [];
+  for (const episode of day.episodes) {
+    if (episode.isSensitive) continue;
+    for (const insight of episode.richContent?.conversationInsights ?? []) {
+      const key = `ai|${insight.question.toLowerCase().slice(0, 160)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push({
+        subject: `AI 대화: ${insight.question}`,
+        detail: insight.answerSummary,
+      });
+    }
+    for (const fact of episode.richContent?.facts ?? []) {
+      const key = `${fact.subject.toLowerCase()}|${fact.detail
+        .toLowerCase()
+        .slice(0, 160)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      facts.push({ subject: fact.subject, detail: fact.detail });
+    }
+  }
+  return facts;
+}
+
 async function generateWithGemini(
   day: DiaryDay,
   apiKey: string,
@@ -592,6 +786,19 @@ async function generateWithGemini(
       count: group.count,
     })),
     titles: safeEpisodes.slice(0, 20).map((episode) => episode.title),
+    contents: safeEpisodes.slice(0, 12).map((episode) => ({
+      title: episode.title,
+      pageType: episode.pageType,
+      summary: episode.richContent?.summary ?? episode.snippet,
+      bodyText: episode.richContent?.bodyText?.slice(0, 4_000),
+      sections: episode.richContent?.sections?.slice(0, 4),
+      facts: episode.richContent?.facts?.slice(0, 12),
+      headings: episode.headings?.slice(0, 3),
+      video: episode.richContent?.video,
+      conversationTurns: episode.richContent?.conversationTurns?.slice(-3),
+      conversationInsights:
+        episode.richContent?.conversationInsights?.slice(-4),
+    })),
     domains: day.topDomains.map((domain) => domain.domain),
     keywords: day.topKeywords,
   };
@@ -640,14 +847,18 @@ function buildRecommendations(
   const kw = keywords.slice(0, 3).map((k) => k.keyword);
   return [
     {
-      title: main ? `${main.label} 흐름을 이어가보세요` : "오늘의 기록을 더 모아보세요",
+      title: main
+        ? `${main.label} 흐름을 이어가보세요`
+        : "오늘의 기록을 더 모아보세요",
       body: main
         ? `${main.count}개의 기록이 이 주제에 모였어요. 다음에는 관련 문서나 작업 결과를 하나로 정리해볼 만합니다.`
         : "방문 기록이 쌓이면 관심 흐름을 더 선명하게 보여드릴 수 있어요.",
       tags: main?.keywords.slice(0, 3) ?? kw,
     },
     {
-      title: second ? `${second.label}도 함께 자라고 있어요` : "반복 키워드를 살펴보세요",
+      title: second
+        ? `${second.label}도 함께 자라고 있어요`
+        : "반복 키워드를 살펴보세요",
       body: second
         ? "주요 관심사 옆에 반복해서 등장한 보조 흐름입니다. 다음 일기의 좋은 단서가 될 수 있어요."
         : `이번 주 자주 등장한 단어는 ${kw.join(", ") || "아직 없음"}입니다.`,
@@ -712,14 +923,23 @@ function formatDayLabel(date: Date): string {
 
 function formatKoreanDate(key: string): string {
   const d = parseDateKey(key);
-  const dow = ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"][
-    d.getDay()
-  ];
+  const dow = [
+    "일요일",
+    "월요일",
+    "화요일",
+    "수요일",
+    "목요일",
+    "금요일",
+    "토요일",
+  ][d.getDay()];
   return `${d.getMonth() + 1}월 ${d.getDate()}일 ${dow}`;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
-  const trimmed = text.trim().replace(/^```json\s*/i, "").replace(/```$/i, "");
+  const trimmed = text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/```$/i, "");
   try {
     const parsed = JSON.parse(trimmed);
     return parsed && typeof parsed === "object"
@@ -728,4 +948,35 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+export async function saveDiaryEntry(
+  dateKey: string,
+  patch: {
+    summary?: string;
+    body?: string;
+    bodyHtml?: string;
+    tags?: string[];
+    format?: import("@/shared/types").DiaryTextFormat;
+    tagNotes?: Record<string, import("@/shared/types").DiaryTagNote>;
+  },
+): Promise<DiaryEntry> {
+  const entries = await getAllDiaryEntries();
+  const existing = entries[dateKey];
+  if (!existing) {
+    throw new Error(`[diary] No entry found for ${dateKey}`);
+  }
+  const updated: DiaryEntry = {
+    ...existing,
+    ...(patch.summary !== undefined && { summary: patch.summary }),
+    ...(patch.body !== undefined && { body: patch.body }),
+    ...(patch.bodyHtml !== undefined && { bodyHtml: patch.bodyHtml }),
+    ...(patch.tags !== undefined && { tags: patch.tags }),
+    ...(patch.format !== undefined && { format: patch.format }),
+    ...(patch.tagNotes !== undefined && { tagNotes: patch.tagNotes }),
+    updatedAt: Date.now(),
+  };
+  entries[dateKey] = updated;
+  await chrome.storage.local.set({ [DIARY_KEYS.entries]: entries });
+  return updated;
 }

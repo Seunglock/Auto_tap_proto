@@ -27,6 +27,52 @@ export type ExtractionSource =
   | "metadata-only"
   | "failed";
 
+export type ConversationTurn = {
+  role: "user" | "assistant";
+  text: string;
+};
+
+export type ConversationInsight = {
+  question: string;
+  answerSummary: string;
+  keyPoints: string[];
+  actionItems?: string[];
+};
+
+export type CodeBlock = {
+  language?: string;
+  code: string;
+};
+
+export type VideoContent = {
+  videoTitle: string;
+  channel?: string;
+  description?: string;
+};
+
+export type ContentSection = {
+  heading?: string;
+  text: string;
+};
+
+export type ContentFact = {
+  subject: string;
+  detail: string;
+  kind: "place" | "product" | "event" | "organization" | "fact";
+  source: "structured-data" | "content-card" | "section" | "sentence";
+};
+
+export type RichContent = {
+  summary?: string;
+  bodyText?: string;
+  sections?: ContentSection[];
+  facts?: ContentFact[];
+  conversationTurns?: ConversationTurn[];
+  conversationInsights?: ConversationInsight[];
+  codeBlocks?: CodeBlock[];
+  video?: VideoContent;
+};
+
 export type ClassificationReason =
   | "initial"
   | "manual-regroup"
@@ -46,6 +92,9 @@ export type GroupDocument = {
   url: string;
   domain: string;
   snippet: string;
+  pageType?: PageType;
+  headings?: string[];
+  richContent?: RichContent;
   tokens: string[];
   embedding: number[];
   collectedAt: number;
@@ -95,6 +144,7 @@ export type StorageSchema = {
   settings: Settings;
   diaryEpisodes: Record<string, DiaryEpisode>;
   diaryEntries: Record<string, DiaryEntry>;
+  diaryHiddenTags: Record<string, string[]>;
   diarySettings: DiarySettings;
 };
 
@@ -106,6 +156,7 @@ export type ExtractedContent = {
   pageType?: PageType;
   extractionSource?: ExtractionSource;
   extractionConfidence?: number;
+  richContent?: RichContent;
 };
 
 // ── Summary types (for popup display) ──────────────────────────────────────
@@ -150,6 +201,9 @@ export type DiaryEpisode = {
   url: string;
   domain: string;
   snippet: string;
+  richContent?: RichContent;
+  pageType?: PageType;
+  headings?: string[];
   groupKey: string | null;
   groupLabel: string;
   keywords: string[];
@@ -161,13 +215,36 @@ export type DiaryEpisode = {
   updatedAt: number;
 };
 
+export type DiaryFontFamily =
+  | "system"
+  | "serif"
+  | "gothic"
+  | "handwriting"
+  | "mono";
+
+export type DiaryTextFormat = {
+  fontFamily: DiaryFontFamily;
+  fontSize: number; // px: 12–24
+  textColor: string; // hex e.g. "#3d2459"
+};
+
+export type DiaryTagNote = {
+  body: string;
+  bodyHtml?: string;
+  format?: DiaryTextFormat;
+  updatedAt: number;
+};
+
 export type DiaryEntry = {
   dateKey: string;
   summary: string;
   body: string;
+  bodyHtml?: string;
   tags: string[];
   sourceEpisodeIds: string[];
   createdAt: number;
+  format?: DiaryTextFormat;
+  tagNotes?: Record<string, DiaryTagNote>;
   updatedAt: number;
 };
 
@@ -195,6 +272,7 @@ export type DiaryDay = {
   dateKey: string;
   episodes: DiaryEpisode[];
   topKeywords: string[];
+  hiddenTags: string[];
   topGroups: DiaryGroupSummary[];
   topDomains: DiaryDomainSummary[];
   stats: DiaryStats;

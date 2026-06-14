@@ -4,6 +4,8 @@ import type {
   DiaryDay,
   DiaryEntry,
   DiarySettings,
+  DiaryTagNote,
+  DiaryTextFormat,
   DiaryWeek,
   ExtractedContent,
   GroupRecord,
@@ -134,6 +136,35 @@ export type UpdateDiarySettingsRequest = {
   settings: Partial<DiarySettings>;
 };
 
+export type SaveDiaryEntryRequest = {
+  type: "SAVE_DIARY_ENTRY";
+  dateKey: string;
+  patch: {
+    summary?: string;
+    body?: string;
+    bodyHtml?: string;
+    tags?: string[];
+    format?: DiaryTextFormat;
+    tagNotes?: Record<string, DiaryTagNote>;
+  };
+};
+
+export type SaveDiaryEntryResponse = {
+  type: "SAVE_DIARY_ENTRY_RESULT";
+  entry: DiaryEntry;
+};
+
+export type UpdateDiaryHiddenTagsRequest = {
+  type: "UPDATE_DIARY_HIDDEN_TAGS";
+  dateKey: string;
+  hiddenTags: string[];
+};
+
+export type UpdateDiaryHiddenTagsResponse = {
+  type: "UPDATE_DIARY_HIDDEN_TAGS_RESULT";
+  hiddenTags: string[];
+};
+
 export type AnyMessage =
   | ExtractRequest
   | ReclassifyRequest
@@ -150,4 +181,6 @@ export type AnyMessage =
   | GenerateDiaryEntryRequest
   | BackfillHistoryRequest
   | GetDiarySettingsRequest
-  | UpdateDiarySettingsRequest;
+  | UpdateDiarySettingsRequest
+  | UpdateDiaryHiddenTagsRequest
+  | SaveDiaryEntryRequest;

@@ -17,8 +17,10 @@ export function extractSearchEngine(): string {
 
   const titles = collectResultTitles();
   if (titles.length > 0) parts.push(titles.slice(0, 12).join(" / "));
+  const snippets = collectResultSnippets();
+  if (snippets.length > 0) parts.push(snippets.slice(0, 8).join(" / "));
 
-  if (titles.length === 0) {
+  if (titles.length === 0 && snippets.length === 0) {
     const main =
       document.querySelector("#search") ??
       document.querySelector("#main") ??
@@ -31,6 +33,31 @@ export function extractSearchEngine(): string {
   }
 
   return parts.join(" | ").replace(/\s+/g, " ").trim();
+}
+
+function collectResultSnippets(): string[] {
+  const selectors = [
+    "#search .VwiC3b",
+    "#search [data-sncf]",
+    ".b_algo p",
+    ".result__snippet",
+    '[data-testid="result-snippet"]',
+    ".api_txt_lines.dsc_txt",
+    ".total_dsc",
+  ];
+  const seen = new Set<string>();
+  const snippets: string[] = [];
+  for (const selector of selectors) {
+    document.querySelectorAll(selector).forEach((node) => {
+      const text = (node as HTMLElement).innerText?.replace(/\s+/g, " ").trim();
+      if (!text || text.length < 20 || text.length > 500 || seen.has(text))
+        return;
+      seen.add(text);
+      snippets.push(text);
+    });
+    if (snippets.length >= 8) break;
+  }
+  return snippets;
 }
 
 function collectResultTitles(): string[] {

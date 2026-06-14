@@ -1,6 +1,8 @@
 import type {
   GroupDocument,
   GroupRecord,
+  PageType,
+  RichContent,
   Settings,
   StorageSchema,
   TabGroupColor,
@@ -28,6 +30,9 @@ function normalizeGroupDocument(raw: Record<string, unknown>): GroupDocument {
     url: (raw.url as string) ?? "",
     domain: (raw.domain as string) ?? "",
     snippet: (raw.snippet as string) ?? "",
+    pageType: raw.pageType as PageType | undefined,
+    headings: (raw.headings as string[] | undefined) ?? undefined,
+    richContent: raw.richContent as RichContent | undefined,
     tokens: (raw.tokens as string[]) ?? [],
     embedding: (raw.embedding as number[]) ?? [],
     collectedAt: (raw.collectedAt as number) ?? 0,
