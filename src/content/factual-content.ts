@@ -6,7 +6,7 @@ const RELATION_CUES =
 const GENERIC_SUBJECT =
   /^(소개|개요|목차|본문|여행|관광|정보|관련|추천|더보기|overview|introduction|contents?|related|more)$/i;
 const NOISE_TEXT =
-  /(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|쿠키|광고|협찬|문의|copyright|sign\s?in|log\s?in|subscribe|follow|share|comment|privacy|cookie|sponsor)/i;
+  /(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|쿠키|광고|협찬|문의|최근\s*수정\s*시각|수정\s*시각|최종\s*수정|copyright|sign\s?in|log\s?in|subscribe|follow|share|comment|privacy|cookie|sponsor|last\s*modified|updated\s*at)/i;
 
 export function extractFactualContent(
   core: CoreContentResult,

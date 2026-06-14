@@ -16,6 +16,8 @@ const NOISE_TAGS = new Set([
   "homepage",
   "instagram",
   "more",
+  "namu",
+  "namuwiki",
   "naver",
   "official",
   "page",
@@ -26,6 +28,7 @@ const NOISE_TAGS = new Set([
   "video",
   "view",
   "web",
+  "wiki",
   "youtube",
   "검색",
   "검색결과",
@@ -37,7 +40,9 @@ const NOISE_TAGS = new Set([
   "메뉴",
   "블로그",
   "사이트",
+  "나무위키",
   "페이지",
+  "위키",
   "홈",
 ]);
 

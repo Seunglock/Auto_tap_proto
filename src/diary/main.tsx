@@ -20,6 +20,7 @@ import type {
 import type {
   DiaryAnalysis,
   DiaryCategoryKey,
+  ContentSection,
   DiaryDay,
   DiaryEntry,
   DiaryEpisode,
@@ -33,6 +34,7 @@ import aliceUrl from "./assets/alice.png";
 import rabbitUrl from "./assets/rabbit.png";
 import timelinePathUrl from "./assets/timeline-path.png";
 import { clusterTags } from "@/shared/tag-utils";
+import { classifyDiaryEpisodeContent } from "@/shared/content-quality";
 
 type ViewKey = "entry" | "timeline" | "board" | "analysis";
 
@@ -801,11 +803,16 @@ function TagWorkspace(props: {
   const tagTopics = useMemo(
     () => {
       const hidden = new Set(props.day.hiddenTags.map(normalizeTag));
-      return buildPrimaryTagTopics(props.day.episodes).filter(
+      const episodeTopics = buildPrimaryTagTopics(props.day.episodes);
+      const topics =
+        episodeTopics.length > 0
+          ? episodeTopics
+          : buildEntryTagTopics(props.entry?.tags ?? [], props.day.episodes);
+      return topics.filter(
         (topic) => !hidden.has(normalizeTag(topic.label)),
       );
     },
-    [props.day],
+    [props.day, props.entry?.tags],
   );
   const [selectedTag, setSelectedTag] = useState(tagTopics[0]?.label ?? "");
   const [isEditing, setIsEditing] = useState(false);
@@ -821,10 +828,18 @@ function TagWorkspace(props: {
       const topic = tagTopics.find((item) => item.label === selectedTag);
       if (!topic) return [];
       const episodeIds = new Set(topic.episodeIds);
+      const tagAliases = [topic.label, ...topic.aliases];
+      const matched = props.day.episodes.filter(
+        (episode) =>
+          !episode.isSensitive &&
+          episodeIds.has(episode.id) &&
+          episodeMatchesAnyTag(episode, tagAliases),
+      );
+      const fallback = props.day.episodes.filter(
+        (episode) => !episode.isSensitive && episodeIds.has(episode.id),
+      );
       return dedupeRelatedEpisodes(
-        props.day.episodes.filter(
-          (episode) => !episode.isSensitive && episodeIds.has(episode.id),
-        ),
+        matched.length > 0 ? matched : fallback,
       );
     },
     [props.day.episodes, selectedTag, tagTopics],
@@ -835,7 +850,11 @@ function TagWorkspace(props: {
   );
   const collectedContentCount = useMemo(
     () =>
-      relatedEpisodes.filter((episode) => episodeContentScore(episode) > 0)
+      relatedEpisodes.filter(
+        (episode) =>
+          classifyDiaryEpisodeContent(episode).grade === "core" &&
+          hasRenderableEpisodeDetail(episode),
+      )
         .length,
     [relatedEpisodes],
   );
@@ -1083,13 +1102,16 @@ function buildPrimaryTagTopics(episodes: DiaryEpisode[]): PrimaryTagTopic[] {
         primaryTagScore(right.label, uniqueEpisodes) -
         primaryTagScore(left.label, uniqueEpisodes),
     )[0];
-    const aliases = [
-      ...new Set(clusters.flatMap((cluster) => cluster.aliases)),
-    ];
+    const aliases = [...new Set(primary.aliases)];
+    const topicEpisodes = groupEpisodes.filter((episode) =>
+      episodeMatchesAnyTag(episode, [primary.label, ...aliases]),
+    );
     const topic: PrimaryTagTopic = {
       label: primary.label,
       aliases,
-      episodeIds: groupEpisodes.map((episode) => episode.id),
+      episodeIds: (topicEpisodes.length > 0 ? topicEpisodes : groupEpisodes).map(
+        (episode) => episode.id,
+      ),
     };
 
     const contentKeys = new Set(
@@ -1127,6 +1149,74 @@ function buildPrimaryTagTopics(episodes: DiaryEpisode[]): PrimaryTagTopic[] {
   return topics
     .sort((left, right) => right.episodeIds.length - left.episodeIds.length)
     .slice(0, 10);
+}
+
+function buildEntryTagTopics(
+  tags: string[],
+  episodes: DiaryEpisode[],
+): PrimaryTagTopic[] {
+  const safeEpisodes = episodes.filter((episode) => !episode.isSensitive);
+  return tags
+    .map((tag) => tag.replace(/^#/, "").trim())
+    .filter(Boolean)
+    .map((tag) => {
+      const matchedEpisodes = safeEpisodes.filter((episode) =>
+        episodeMatchesTag(episode, tag),
+      );
+      return {
+        label: tag,
+        aliases: [tag],
+        episodeIds: matchedEpisodes.map((episode) => episode.id),
+      };
+    })
+    .filter((topic, index, topics) => {
+      const key = normalizeTag(topic.label);
+      return topics.findIndex((item) => normalizeTag(item.label) === key) === index;
+    })
+    .slice(0, 10);
+}
+
+function episodeMatchesTag(episode: DiaryEpisode, tag: string): boolean {
+  const needle = normalizeTag(tag);
+  if (!needle) return false;
+  const haystack = normalizeTag(
+    [
+      episode.title,
+      readableUrlText(episode.url),
+      episode.groupLabel,
+      episode.snippet,
+      ...(episode.keywords ?? []),
+      ...(episode.tokens ?? []),
+      ...(episode.headings ?? []),
+      episode.richContent?.summary,
+      episode.richContent?.bodyText?.slice(0, 1_000),
+      ...(episode.richContent?.facts ?? []).flatMap((fact) => [
+        fact.subject,
+        fact.detail,
+      ]),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+  return haystack.includes(needle);
+}
+
+function episodeMatchesAnyTag(episode: DiaryEpisode, tags: string[]): boolean {
+  return tags.some((tag) => episodeMatchesTag(episode, tag));
+}
+
+function readableUrlText(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const params = ["q", "query", "wd", "p", "search_query", "qry", "mq"]
+      .map((key) => parsed.searchParams.get(key))
+      .filter((value): value is string => !!value);
+    return decodeURIComponent(
+      [parsed.hostname, parsed.pathname, ...params].join(" "),
+    );
+  } catch {
+    return url;
+  }
 }
 
 function primaryTagScore(tag: string, episodes: DiaryEpisode[]): number {
@@ -1175,6 +1265,16 @@ function canonicalEpisodeKey(episode: DiaryEpisode): string {
   try {
     const url = new URL(episode.url);
     url.hash = "";
+    const searchQuery = isSearchEpisode(episode)
+      ? ["q", "query", "wd", "p", "search_query", "qry", "mq"]
+          .map((key) => url.searchParams.get(key)?.trim())
+          .find(Boolean)
+      : "";
+    if (searchQuery) {
+      url.search = "";
+      url.searchParams.set("q", searchQuery);
+      return url.toString();
+    }
     [
       "utm_source",
       "utm_medium",
@@ -1214,14 +1314,31 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
   if (episodes.length === 0)
     return `#${tag}와 직접 연결된 수집 내용을 아직 찾지 못했습니다.`;
 
-  const contentful = [...episodes]
-    .filter((episode) => episodeContentScore(episode) > 0)
+  const assessed = episodes.map((episode) => ({
+    episode,
+    quality: classifyDiaryEpisodeContent(episode),
+  }));
+  const coreEpisodes = assessed
+    .filter(
+      (item) =>
+        item.quality.grade === "core" &&
+        hasRenderableEpisodeDetail(item.episode),
+    )
     .sort(
       (left, right) =>
-        episodeContentScore(right) - episodeContentScore(left) ||
-        right.updatedAt - left.updatedAt,
+        right.quality.score - left.quality.score ||
+        episodeContentScore(right.episode) - episodeContentScore(left.episode) ||
+        right.episode.updatedAt - left.episode.updatedAt,
+    )
+    .map((item) => item.episode);
+  const contextEpisodes = assessed
+    .filter((item) => item.quality.grade === "context")
+    .sort(
+      (left, right) =>
+        right.quality.score - left.quality.score ||
+        right.episode.updatedAt - left.episode.updatedAt,
     );
-  if (contentful.length === 0) {
+  if (coreEpisodes.length === 0 && contextEpisodes.length === 0) {
     return [
       `#${tag} 관련 수집 내용`,
       "관련 페이지는 찾았지만 본문을 아직 수집하지 못했습니다.",
@@ -1229,18 +1346,28 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
     ].join("\n\n");
   }
 
-  const lines = [
-    `#${tag} 핵심 정보`,
-    `${contentful.length}개의 관련 페이지에서 핵심 내용을 정리했습니다.`,
-  ];
+  const lines =
+    coreEpisodes.length > 0
+      ? [
+          `#${tag} 핵심 정보`,
+          `${coreEpisodes.length}개의 관련 페이지에서 핵심 내용을 정리했습니다.`,
+        ]
+      : [
+          `#${tag} 관련 탐색 맥락`,
+          "원문 본문으로 요약하기 어려운 페이지가 있어 탐색 맥락만 정리했습니다.",
+        ];
   const seenDetails = new Set<string>();
   const seenPages = new Set<string>();
-  for (const episode of contentful.slice(0, 8)) {
+  for (const episode of coreEpisodes.slice(0, 8)) {
     const pageKey = episodeContentFingerprint(episode);
     if (pageKey && seenPages.has(pageKey)) continue;
     if (pageKey) seenPages.add(pageKey);
     const title = cleanCollectedText(episode.title || episode.domain);
     const pageLines = [`[${pageTypeLabel(episode)}] ${title}`];
+    const pageOverview = pageOverviewSummary(episode);
+    if (pageOverview) {
+      pageLines.push(`- 개요: ${pageOverview}`);
+    }
     const conversationInsights = episode.richContent?.conversationInsights ?? [];
     for (const insight of conversationInsights.slice(-3)) {
       const insightKey = normalizeTag(
@@ -1259,21 +1386,23 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
         );
       }
     }
-    const facts = [...(episode.richContent?.facts ?? [])]
-      .filter((fact) => cleanCollectedText(fact.detail).length >= 20)
-      .sort(
-        (left, right) =>
-          Number(factMatchesTag(right.subject, right.detail, tag)) -
-          Number(factMatchesTag(left.subject, left.detail, tag)),
-      );
+    if (!pageOverview) {
+      const facts = [...(episode.richContent?.facts ?? [])]
+        .filter((fact) => isUsefulCollectedFact(fact.subject, fact.detail))
+        .sort(
+          (left, right) =>
+            Number(factMatchesTag(right.subject, right.detail, tag)) -
+            Number(factMatchesTag(left.subject, left.detail, tag)),
+        );
 
-    for (const fact of facts.slice(0, 4)) {
-      const subject = cleanCollectedText(fact.subject);
-      const detail = cleanCollectedText(fact.detail);
-      const key = normalizeTag(`${subject}:${detail.slice(0, 160)}`);
-      if (!detail || seenDetails.has(key)) continue;
-      seenDetails.add(key);
-      pageLines.push(`- ${subject}: ${detail}`);
+      for (const fact of facts.slice(0, 4)) {
+        const subject = cleanCollectedText(fact.subject);
+        const detail = cleanCollectedText(fact.detail);
+        const key = normalizeTag(`${subject}:${detail.slice(0, 160)}`);
+        if (!detail || seenDetails.has(key)) continue;
+        seenDetails.add(key);
+        pageLines.push(`- ${subject}: ${detail}`);
+      }
     }
 
     const video = episode.richContent?.video;
@@ -1301,12 +1430,7 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
     }
 
     if (pageLines.length === 1) {
-      const summary = collectedExcerpt(
-        episode.richContent?.summary ??
-          episode.richContent?.bodyText ??
-          episode.snippet,
-        550,
-      );
+      const summary = collectedExcerpt(bestCollectedSummary(episode), 550);
       if (summary) pageLines.push(`- 핵심 내용: ${summary}`);
     }
 
@@ -1315,7 +1439,154 @@ function buildTagViewBody(tag: string, episodes: DiaryEpisode[]): string {
       lines.push(pageLines.join("\n"));
     }
   }
+  const contextLines = buildContextEpisodeLines(
+    tag,
+    contextEpisodes.map((item) => item.episode),
+  );
+  if (contextLines.length > 0) {
+    if (coreEpisodes.length > 0) lines.push("관련 탐색 맥락");
+    lines.push(...contextLines);
+  }
   return lines.join("\n\n");
+}
+
+function buildContextEpisodeLines(
+  tag: string,
+  episodes: DiaryEpisode[],
+): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const episode of episodes.slice(0, 6)) {
+    const key = canonicalEpisodeKey(episode) || episode.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const title = cleanCollectedText(episode.title || episode.domain);
+    const query = extractSearchQuery(episode);
+    const label = pageTypeLabel(episode);
+    const source = episode.domain || episode.url;
+    const details = [
+      query && normalizeTag(query) !== normalizeTag(tag)
+        ? `검색어: ${query}`
+        : undefined,
+      source ? `출처: ${source}` : undefined,
+    ].filter(Boolean);
+    lines.push(
+      `- [${label}] ${title || `#${tag} 관련 페이지`}${
+        details.length > 0 ? ` (${details.join(" · ")})` : ""
+      }`,
+    );
+  }
+  return lines;
+}
+
+function extractSearchQuery(episode: DiaryEpisode): string {
+  try {
+    const url = new URL(episode.url);
+    for (const key of ["q", "query", "wd", "p", "search_query", "qry"]) {
+      const value = url.searchParams.get(key)?.trim();
+      if (value) return cleanCollectedText(value).slice(0, 80);
+    }
+  } catch {
+    // Fall back to title/snippet below.
+  }
+  if (episode.pageType !== "search") return "";
+  const title = cleanCollectedText(episode.title)
+    .replace(/\s*-\s*(Google|Bing|Yahoo|DuckDuckGo|Naver|Daum).*$/i, "")
+    .replace(/\s*검색결과\s*$/i, "")
+    .trim();
+  if (title && title.length <= 80) return title;
+  const snippet = cleanCollectedText(episode.snippet);
+  return snippet.split(/[|/·•›»]/)[0]?.trim().slice(0, 80) ?? "";
+}
+
+function isUsefulCollectedFact(subject: string, detail: string): boolean {
+  const cleanedSubject = cleanCollectedText(subject);
+  const cleanedDetail = cleanCollectedText(detail);
+  if (cleanedDetail.length < 35) return false;
+  if (isLowValueCollectedText(`${cleanedSubject} ${cleanedDetail}`)) return false;
+  if (cleanedSubject === cleanedDetail) return false;
+  return true;
+}
+
+function hasRenderableEpisodeDetail(episode: DiaryEpisode): boolean {
+  if ((episode.richContent?.conversationInsights ?? []).length > 0) return true;
+  if (cleanCollectedText(episode.richContent?.video?.description ?? "").length >= 80)
+    return true;
+  if (
+    (episode.richContent?.facts ?? []).some((fact) =>
+      isUsefulCollectedFact(fact.subject, fact.detail),
+    )
+  )
+    return true;
+  if (
+    (episode.richContent?.sections ?? []).some(
+      (section) => cleanCollectedText(section.text).length >= 80,
+    )
+  )
+    return true;
+  return cleanCollectedText(bestCollectedSummary(episode)).length >= 80;
+}
+
+function bestCollectedSummary(episode: DiaryEpisode): string {
+  return (
+    pageOverviewSummary(episode) ||
+    bestBodySummary(episode) ||
+    (isLowValueCollectedText(episode.snippet) ? "" : episode.snippet)
+  );
+}
+
+function pageOverviewSummary(episode: DiaryEpisode): string {
+  const overviewSection =
+    episode.richContent?.sections?.find((section) =>
+      isOverviewHeading(section.heading ?? ""),
+    ) ?? firstReadableSection(episode);
+  const overviewText = cleanCollectedText(overviewSection?.text ?? "");
+  if (overviewText.length >= 80) return collectedExcerpt(overviewText, 900);
+
+  const summary = cleanCollectedText(episode.richContent?.summary ?? "").replace(
+    /^(개요|소개|특징|요약|본문|overview|introduction|summary)\s*:\s*/i,
+    "",
+  );
+  return summary.length >= 80 ? collectedExcerpt(summary, 900) : "";
+}
+
+function firstReadableSection(
+  episode: DiaryEpisode,
+): ContentSection | undefined {
+  return episode.richContent?.sections?.find(
+    (section) =>
+      cleanCollectedText(section.text).length >= 80 &&
+      !isLowValueCollectedText(`${section.heading ?? ""} ${section.text}`),
+  );
+}
+
+function bestBodySummary(episode: DiaryEpisode): string {
+  const bodyText = episode.richContent?.bodyText;
+  if (bodyText && !isLowValueCollectedText(bodyText))
+    return collectedExcerpt(bodyText, 900);
+  return "";
+}
+
+function isOverviewHeading(value: string): boolean {
+  const heading = cleanCollectedText(value).toLowerCase();
+  return /^(개요|소개|특징|요약|본문|overview|introduction|summary|about)$/.test(
+    heading,
+  );
+}
+
+function isLowValueCollectedText(value: string): boolean {
+  const cleaned = cleanCollectedText(value);
+  if (!cleaned) return true;
+  if (
+    /(최근\s*수정\s*시각|수정\s*시각|최종\s*수정|last\s*modified|updated\s*at)/i.test(
+      cleaned,
+    )
+  )
+    return true;
+  if (/^\d{4}[-./년]\s*\d{1,2}[-./월]\s*\d{1,2}/.test(cleaned)) return true;
+  if ((cleaned.match(/\d{4}[-.:]\d{1,2}[-.:]\d{1,2}|\d{1,2}:\d{2}/g) ?? []).length >= 2)
+    return true;
+  return false;
 }
 
 function episodeContentScore(episode: DiaryEpisode): number {
@@ -1339,9 +1610,31 @@ function factMatchesTag(subject: string, detail: string, tag: string): boolean {
 function pageTypeLabel(episode: DiaryEpisode): string {
   if (episode.pageType === "video") return "영상";
   if (episode.pageType === "documentation") return "문서";
-  if (episode.pageType === "search") return "검색 결과";
+  if (isSearchEpisode(episode)) return "검색 결과";
   if (episode.pageType === "ai-chat") return "AI 대화";
   return "페이지";
+}
+
+function isSearchEpisode(episode: DiaryEpisode): boolean {
+  if (episode.pageType === "search") return true;
+  try {
+    const url = new URL(episode.url);
+    const host = url.hostname.replace(/^www\./, "");
+    if (
+      /(^|\.)google\./.test(host) &&
+      url.pathname === "/search" &&
+      url.searchParams.has("q")
+    )
+      return true;
+    if (/(^|\.)bing\.com$/.test(host) && url.pathname === "/search")
+      return true;
+    if (/search\.naver\.com$/.test(host)) return true;
+    if (/search\.daum\.net$/.test(host)) return true;
+    if (/youtube\.com$/.test(host) && url.pathname === "/results") return true;
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function collectedExcerpt(value: string | undefined, maxChars: number): string {
@@ -1356,9 +1649,21 @@ function cleanCollectedText(value: string): string {
   const noise =
     /^(로그인|회원가입|댓글|공유|구독|좋아요|알림|팔로우|더보기|전체보기|메뉴|이용약관|개인정보|쿠키|광고|협찬|copyright|sign\s?in|log\s?in|subscribe|follow|share|comment|privacy|cookie|sponsor)\b/i;
   return value
+    .replace(
+      /(최근\s*수정\s*시각|수정\s*시각|최종\s*수정)\s*:?\s*\d{4}[-./년]\s*\d{1,2}[-./월]\s*\d{1,2}(?:\s*\d{1,2}:\d{2}(?::\d{2})?)?/gi,
+      " ",
+    )
+    .replace(
+      /(last\s*modified|updated\s*at)\s*:?\s*[A-Za-z0-9,:\-./\s]{8,40}/gi,
+      " ",
+    )
     .split(/\n+/)
     .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter((line) => line.length >= 2 && !noise.test(line))
+    .filter(
+      (line) =>
+        line.length >= 2 &&
+        !noise.test(line),
+    )
     .join(" ")
     .trim();
 }

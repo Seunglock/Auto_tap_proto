@@ -53,6 +53,9 @@ export async function classifyTab(
   }
   const settings = await getSettings();
   if (!settings.enabled) return { kind: "skipped", reason: "disabled" };
+  if (!(await isNormalWindowTab(tab))) {
+    return { kind: "skipped", reason: "non-normal-window" };
+  }
 
   const passageText = buildPassageText(
     content.title,
@@ -497,7 +500,7 @@ async function moveChromeGroupTabs(
   if (tabIds.length === 0) return true;
 
   try {
-    await chrome.tabs.group({ tabIds, groupId: targetChromeGroupId });
+    await groupTabsWithRetry({ tabIds, groupId: targetChromeGroupId });
     return true;
   } catch (err) {
     console.warn("[auto-tab-group] move merged tabs failed", err);
@@ -574,7 +577,7 @@ async function createNewGroup(
   content: ExtractedContent,
 ): Promise<GroupRecord> {
   const groupKey = makeGroupKey();
-  const chromeGroupId = await chrome.tabs.group({ tabIds: [tabId] });
+  const chromeGroupId = await groupTabsWithRetry({ tabIds: [tabId] });
   const domain = extractDomainFromUrl(content.url);
 
   const tempGroup: GroupRecord = {
@@ -741,10 +744,48 @@ async function joinChromeGroup(
   chromeGroupId: number,
 ): Promise<void> {
   try {
-    await chrome.tabs.group({ tabIds: [tabId], groupId: chromeGroupId });
+    await groupTabsWithRetry({ tabIds: [tabId], groupId: chromeGroupId });
   } catch (err) {
     console.warn("[auto-tab-group] join failed", err);
   }
+}
+
+async function groupTabsWithRetry(
+  options: chrome.tabs.GroupOptions,
+): Promise<number> {
+  const maxAttempts = 4;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await chrome.tabs.group(options);
+    } catch (err) {
+      if (!isTransientTabEditError(err) || attempt === maxAttempts - 1) {
+        throw err;
+      }
+      await delay(180 * (attempt + 1));
+    }
+  }
+  return chrome.tabGroups.TAB_GROUP_ID_NONE;
+}
+
+function isTransientTabEditError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /Tabs cannot be edited right now|user may be dragging a tab/i.test(
+    message,
+  );
+}
+
+async function isNormalWindowTab(tab: chrome.tabs.Tab): Promise<boolean> {
+  if (typeof tab.windowId !== "number") return false;
+  try {
+    const window = await chrome.windows.get(tab.windowId);
+    return window.type === "normal";
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function safeRecordDiaryEpisode(

@@ -6,6 +6,7 @@ import { extractChatGPTTurns } from "./site-extractors/chatgpt";
 import { extractClaudeTurns } from "./site-extractors/claude";
 import { extractGeminiTurns } from "./site-extractors/gemini";
 import { extractVideoContent } from "./site-extractors/video";
+import { extractNamuWikiContent } from "./site-extractors/namuwiki";
 import {
   extractFactualContent,
   extractFactsFromText,
@@ -82,42 +83,53 @@ function buildExtracted(): ExtractedContent {
   // Generic page: use core-content for structured extraction
   const core = safeRunCoreContent();
   const pageType = detectPageType(host, location.pathname);
+  const namuWiki =
+    host === "namu.wiki" || host.endsWith(".namu.wiki")
+      ? safeRunNamuWikiContent()
+      : null;
   const video = pageType === "video" ? extractVideoContent() : undefined;
   const description = extractMetaDescription();
+  const sourceBodyText = namuWiki?.bodyText ?? core.bodyText;
   const facts =
     pageType === "video"
       ? extractFactsFromText(video?.description ?? "", title).slice(0, 12)
-      : extractFactualContent(core, title);
+      : namuWiki
+        ? extractFactsFromText(namuWiki.bodyText, title).slice(0, 20)
+        : extractFactualContent(core, title);
   const factSummary = summarizeFacts(facts);
+  const pageSummary = joinDistinct([
+    namuWiki?.summary ?? "",
+    core.text,
+    description,
+  ]);
 
   const videoSnippet = video
     ? [video.videoTitle, video.channel, video.description]
         .filter(Boolean)
         .join(" | ")
     : "";
-  const snippet =
-    videoSnippet || joinDistinct([factSummary, core.text, description]);
+  const snippet = videoSnippet || joinDistinct([pageSummary, factSummary]);
   const fallbackSnippet = snippet || safeRun(pickExtractor());
   const bodyText =
     pageType === "video"
       ? video?.description ?? fallbackSnippet
-      : core.bodyText || fallbackSnippet;
+      : sourceBodyText || fallbackSnippet;
 
   return {
     title,
     url: location.href,
     contentSnippet: fallbackSnippet.slice(0, 1_800),
-    headings: core.headings,
+    headings: namuWiki?.headings ?? core.headings,
     pageType,
     extractionSource:
-      core.confidence >= 0.55 ? "core-content" : "metadata-only",
-    extractionConfidence: core.confidence,
+      namuWiki || core.confidence >= 0.55 ? "core-content" : "metadata-only",
+    extractionConfidence: namuWiki ? 0.82 : core.confidence,
     richContent: {
-      summary: (factSummary || fallbackSnippet).slice(0, 1_800),
+      summary: (pageSummary || factSummary || fallbackSnippet).slice(0, 1_800),
       bodyText: bodyText.slice(0, 16_000),
       sections:
-        pageType !== "video" && core.sections.length > 0
-          ? core.sections
+        pageType !== "video" && (namuWiki?.sections.length || core.sections.length)
+          ? (namuWiki?.sections ?? core.sections)
           : undefined,
       facts: facts.length > 0 ? facts : undefined,
       codeBlocks:
@@ -197,6 +209,15 @@ function safeRunCoreContent(): import("./core-content").CoreContentResult {
       confidence: 0,
       source: "fallback",
     };
+  }
+}
+
+function safeRunNamuWikiContent(): ReturnType<typeof extractNamuWikiContent> {
+  try {
+    return extractNamuWikiContent();
+  } catch (err) {
+    console.warn("[auto-tab-group] namuwiki extraction failed", err);
+    return null;
   }
 }
 

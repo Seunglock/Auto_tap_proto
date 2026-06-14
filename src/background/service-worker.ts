@@ -272,9 +272,13 @@ async function runClassification(
     return;
   }
 
-  const content = settings.contentExtractionEnabled
-    ? ((await requestExtract(tabId)) ?? (await fallbackExtract(tab)))
-    : await fallbackExtract(tab);
+  const extracted = settings.contentExtractionEnabled
+    ? await requestExtract(tabId)
+    : null;
+  if (settings.contentExtractionEnabled && !extracted) {
+    return;
+  }
+  const content = extracted ?? (await fallbackExtract(tab));
 
   if (!content.title && !content.contentSnippet) {
     content.title = tab.title ?? tabHint.title ?? "";
@@ -444,8 +448,8 @@ async function handleMessage(
       for (const tab of tabs) {
         if (typeof tab.id !== "number") continue;
         if (!shouldClassify(tab)) continue;
-        const content =
-          (await requestExtract(tab.id)) ?? (await fallbackExtract(tab));
+        const content = await requestExtract(tab.id);
+        if (!content) continue;
         try {
           await classifyTab(tab, content, {
             reason: "manual-regroup",

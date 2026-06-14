@@ -13,6 +13,9 @@ export async function requestExtract(
         }
       }
     } catch (err) {
+      if (isMissingContentScriptError(err)) {
+        return null;
+      }
       if (attempt === 2) {
         console.warn("[auto-tab-group] extract request failed", err);
       }
@@ -20,6 +23,13 @@ export async function requestExtract(
     await delay(350 * (attempt + 1));
   }
   return null;
+}
+
+function isMissingContentScriptError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /Could not establish connection|Receiving end does not exist/i.test(
+    message,
+  );
 }
 
 function delay(ms: number): Promise<void> {
