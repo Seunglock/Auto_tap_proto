@@ -2100,9 +2100,7 @@ function AnalysisView(props: {
         <div>
           <div className="kicker">이번 주의 너</div>
           <h1>
-            {props.analysis.topGroups[0]?.label ?? "기록"}을
-            <br />
-            따라간 한 주.
+            {props.analysis.topGroups[0]?.label ?? "기록"}을 따라간 한 주.
           </h1>
           <p>
             Auto Tab Group이 반복해서 묶은 라벨과 키워드로 관심 흐름을
@@ -2139,13 +2137,9 @@ function AnalysisView(props: {
         <section className="glass">
           <div className="sec-k">자주 등장한 키워드</div>
           <div className="keywords">
-            {props.analysis.topKeywords.slice(0, 18).map((item, idx) => (
-              <span
-                key={item.keyword}
-                className="wc"
-                style={{ fontSize: `${32 - Math.min(idx, 10)}px` }}
-              >
-                {item.keyword}
+            {props.analysis.topKeywords.map((item) => (
+              <span key={item.keyword} className="wc">
+                - {item.keyword}
               </span>
             ))}
           </div>
